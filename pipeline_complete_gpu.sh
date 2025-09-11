@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Complete MD Pipeline - FAST VERSION (Skip Validation Only)
-set -uo pipefail
+set -euo pipefail
 
 ########################
 # User Configuration
@@ -90,7 +90,7 @@ function run_one() {
   cd "$ROOT"
 }
 
-# Analysis Function
+# Analysis Function ← これ追加！！
 function analyze_one() {
   local species="$1"
   local model="$2"
@@ -162,11 +162,13 @@ for model in "${!H2O_MODELS[@]}"; do
       run_one "H2O" "$model" "slab" "$T" "$rep"
     done
 
+    # 各温度終了後に解析！！
     analyze_one "H2O" "$model" "bulk" "$T"
     analyze_one "H2O" "$model" "slab" "$T"
   done
 done
 
+# Final Summary
 log_msg "=== All Simulations Complete ==="
 
 if [[ -f "$ROOT/analysis/generate_report.py" ]]; then
