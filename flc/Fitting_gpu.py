@@ -29,7 +29,7 @@ losses = optimizer.evaluate_candidates(candidates_list)
 環 (Tamaki) - AI Co-Developer
 
 【日付】
-2025-01-06
+2025-10-06
 =============================================================================
 """
 
@@ -121,6 +121,21 @@ class FLCPoint:
     duration_max: float = 1.0    # 試験上限時間 [s]
     label: str = ""
 
+# =============================================================================
+# JAX関連（条件付きインポート） - Section 1の後に追加
+# =============================================================================
+
+JAX_AVAILABLE = False
+try:
+    import jax
+    import jax.numpy as jnp
+    from jax import jit, vmap, grad
+    import optax
+    JAX_AVAILABLE = True
+    print(f"✓ JAX利用可能: バージョン {jax.__version__}")
+except ImportError:
+    print("⚠️  JAX未インストール: CPU最適化のみ")
+  
 # =============================================================================
 # Section 2: CPU版実装（既存の全機能）
 # =============================================================================
@@ -584,6 +599,82 @@ def fit_edr_params_staged_v2(binary_exps: List[ExpBinary],
     return final_edr, info
 
 # -----------------------------------------------------------------------------
+# 2.8) Hybrid最適化（JAX + L-BFGS-B）
+# -----------------------------------------------------------------------------
+
+def fit_edr_params_hybrid(binary_exps: List[ExpBinary],
+                          flc_pts: List[FLCPoint],
+                          mat: MaterialParams,
+                          initial_edr: Optional[EDRParams] = None,
+                          use_jax: bool = True,
+                          verbose: bool = True) -> Tuple[EDRParams, Dict]:
+    """
+    Hybrid最適化：JAX粗探索 → L-BFGS-B精密化
+    
+    Args:
+        binary_exps: 実験データ
+        flc_pts: FLC点データ
+        mat: 材料パラメータ
+        initial_edr: 初期EDRパラメータ
+        use_jax: JAXを使用するか（False時は従来手法）
+        verbose: ログ出力
+    
+    Returns:
+        最適化されたEDRParams, 情報dict
+    """
+    
+    if initial_edr is None:
+        initial_edr = EDRParams()
+    
+    # Phase 1: JAX + AdamW（高速粗探索）
+    if use_jax and JAX_AVAILABLE:
+        print("\n" + "="*60)
+        print(" Phase 1: JAX + AdamW 粗探索")
+        print("="*60)
+        
+        params_jax = fit_with_adamw_jax(
+            binary_exps, mat, initial_edr,
+            n_steps=3000, verbose=verbose
+        )
+        
+        # JAX結果をEDRParamsに変換
+        edr_dict = transform_params_jax(params_jax)
+        intermediate_edr = edr_dict_to_dataclass(edr_dict)
+        
+        if verbose:
+            print("\n  Phase 1完了！次はL-BFGS-Bで精密化...")
+    else:
+        if verbose and use_jax:
+            print("⚠️  JAX未利用: 従来のStep1から開始")
+        # 従来のStep1を使用
+        intermediate_edr = fit_step1_critical_params_v2(
+            binary_exps, mat, initial_edr, verbose
+        )
+    
+    # Phase 2: L-BFGS-B（精密化）
+    print("\n" + "="*60)
+    print(" Phase 2: L-BFGS-B 精密化")
+    print("="*60)
+    
+    edr_step2 = fit_step2_V0(binary_exps, mat, intermediate_edr, verbose)
+    final_edr, info = fit_step3_fine_tuning_v2(
+        binary_exps, flc_pts, mat, edr_step2, verbose
+    )
+    
+    # 最終検証
+    if verbose:
+        print("\n=== Final Validation ===")
+        loss_final = loss_for_binary_improved_v2(
+            binary_exps, mat, final_edr,
+            margin=0.08, Dcrit=0.01, debug=True
+        )
+        print(f"Final binary loss: {loss_final:.4f}")
+    
+    info['used_jax'] = use_jax and JAX_AVAILABLE
+    
+    return final_edr, info
+
+# -----------------------------------------------------------------------------
 # 2.5) ヘルパー関数
 # -----------------------------------------------------------------------------
 
@@ -665,6 +756,181 @@ def plot_lambda_t(res: Dict[str,np.ndarray], title="Lambda timeline v2"):
     
     plt.tight_layout()
     plt.show()
+
+# -----------------------------------------------------------------------------
+# 2.7) JAX版実装（勾配ベース最適化）
+# -----------------------------------------------------------------------------
+
+if JAX_AVAILABLE:
+    
+    def init_edr_params_jax():
+        """JAX用パラメータ初期化（log空間）"""
+        return {
+            'log_V0': jnp.log(2e9),
+            'log_av': jnp.log(3e4),
+            'log_ad': jnp.log(1e-7),
+            'logit_chi': jnp.log(0.1 / (1 - 0.1)),  # logit変換
+            'logit_K_scale': jnp.log(0.2 / (1 - 0.2)),
+            'logit_K_scale_draw': jnp.log(0.15 / (1 - 0.15)),
+            'logit_K_scale_plane': jnp.log(0.25 / (1 - 0.25)),
+            'logit_K_scale_biax': jnp.log(0.20 / (1 - 0.20)),
+            'logit_triax_sens': jnp.log(0.3 / (1 - 0.3)),
+            'Lambda_crit': jnp.array(1.0),
+            'logit_beta_A': jnp.log(0.35 / (1 - 0.35)),
+            'logit_beta_bw': jnp.log(0.28 / (1 - 0.28)),
+        }
+    
+    def transform_params_jax(raw_params):
+        """制約付きパラメータ変換"""
+        return {
+            'V0': jnp.exp(raw_params['log_V0']),
+            'av': jnp.exp(raw_params['log_av']),
+            'ad': jnp.exp(raw_params['log_ad']),
+            'chi': jax.nn.sigmoid(raw_params['logit_chi']) * 0.25 + 0.05,  # [0.05, 0.3]
+            'K_scale': jax.nn.sigmoid(raw_params['logit_K_scale']) * 0.95 + 0.05,  # [0.05, 1.0]
+            'K_scale_draw': jax.nn.sigmoid(raw_params['logit_K_scale_draw']) * 0.25 + 0.05,
+            'K_scale_plane': jax.nn.sigmoid(raw_params['logit_K_scale_plane']) * 0.30 + 0.1,
+            'K_scale_biax': jax.nn.sigmoid(raw_params['logit_K_scale_biax']) * 0.25 + 0.05,
+            'triax_sens': jax.nn.sigmoid(raw_params['logit_triax_sens']) * 0.4 + 0.1,  # [0.1, 0.5]
+            'Lambda_crit': jnp.clip(raw_params['Lambda_crit'], 0.95, 1.05),
+            'beta_A': jax.nn.sigmoid(raw_params['logit_beta_A']) * 0.3 + 0.2,  # [0.2, 0.5]
+            'beta_bw': jax.nn.sigmoid(raw_params['logit_beta_bw']) * 0.15 + 0.2,  # [0.2, 0.35]
+        }
+    
+    def edr_dict_to_dataclass(edr_dict):
+        """dict → EDRParams変換"""
+        return EDRParams(
+            V0=float(edr_dict['V0']),
+            av=float(edr_dict['av']),
+            ad=float(edr_dict['ad']),
+            chi=float(edr_dict['chi']),
+            K_scale=float(edr_dict['K_scale']),
+            triax_sens=float(edr_dict['triax_sens']),
+            Lambda_crit=float(edr_dict['Lambda_crit']),
+            K_scale_draw=float(edr_dict['K_scale_draw']),
+            K_scale_plane=float(edr_dict['K_scale_plane']),
+            K_scale_biax=float(edr_dict['K_scale_biax']),
+            beta_A=float(edr_dict['beta_A']),
+            beta_bw=float(edr_dict['beta_bw']),
+        )
+    
+    @jit
+    def beta_multiplier_jax(beta, A, bw):
+        """分岐レスβ乗算器"""
+        b = jnp.clip(beta, -0.95, 0.95)
+        return 1.0 + A * jnp.exp(-(b / bw)**2)
+    
+    def loss_single_exp_jax(schedule_np, mat, edr_dict, failed):
+        """単一実験の損失（JAX版・簡易版）"""
+        # ここでは既存のsimulate_lambdaを使用
+        # 完全JAX化は次のステップで
+        edr_dc = edr_dict_to_dataclass(edr_dict)
+        res = simulate_lambda(schedule_np, mat, edr_dc, debug=False)
+        
+        Lam_smooth = smooth_signal(res["Lambda"], window_size=11)
+        peak = float(np.max(Lam_smooth))
+        D_end = float(res["Damage"][-1])
+        
+        margin = 0.08; Dcrit = 0.01; delta = 0.03
+        
+        if failed == 1:
+            condition_met = (peak > edr_dc.Lambda_crit and D_end > Dcrit)
+            if not condition_met:
+                return 10.0 * ((edr_dc.Lambda_crit - peak)**2 + (Dcrit - D_end)**2)
+            else:
+                loss = 0.0
+                if peak < edr_dc.Lambda_crit + margin:
+                    loss += (edr_dc.Lambda_crit + margin - peak)**2
+                if D_end < 2*Dcrit:
+                    loss += (2*Dcrit - D_end)**2
+                return loss
+        else:
+            loss = 0.0
+            if peak > edr_dc.Lambda_crit - delta:
+                loss += (peak - (edr_dc.Lambda_crit - delta))**2 * 3.0
+            if D_end >= 0.5*Dcrit:
+                loss += 10.0 * (D_end - 0.5*Dcrit)**2
+            return loss
+    
+    def loss_fn_jax(raw_params, exps, mat):
+        """バッチ損失関数"""
+        edr_dict = transform_params_jax(raw_params)
+        
+        total_loss = 0.0
+        for exp in exps:
+            loss = loss_single_exp_jax(exp.schedule, mat, edr_dict, exp.failed)
+            total_loss += loss
+        
+        return total_loss / len(exps)
+    
+    def fit_with_adamw_jax(exps: List[ExpBinary],
+                           mat: MaterialParams,
+                           initial_edr: Optional[EDRParams] = None,
+                           n_steps: int = 3000,
+                           lr_init: float = 1e-3,
+                           lr_peak: float = 5e-3,
+                           verbose: bool = True) -> Dict:
+        """AdamWによるフィッティング（Phase 1）"""
+        
+        if verbose:
+            print("\n=== JAX + AdamW 最適化 ===")
+        
+        # 初期化
+        if initial_edr is None:
+            params = init_edr_params_jax()
+        else:
+            # initial_edrから初期化（実装省略）
+            params = init_edr_params_jax()
+        
+        # スケジューラ
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=lr_init,
+            peak_value=lr_peak,
+            warmup_steps=100,
+            decay_steps=n_steps - 100,
+        )
+        
+        # オプティマイザ
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adamw(learning_rate=schedule, weight_decay=1e-4)
+        )
+        
+        opt_state = optimizer.init(params)
+        
+        # 勾配関数
+        grad_fn = jax.grad(loss_fn_jax)
+        
+        # 最適化ループ
+        best_loss = float('inf')
+        best_params = params
+        
+        for step in range(n_steps):
+            # 勾配計算
+            grads = grad_fn(params, exps, mat)
+            
+            # パラメータ更新
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            
+            # ログ
+            if step % 100 == 0:
+                loss = loss_fn_jax(params, exps, mat)
+                if loss < best_loss:
+                    best_loss = loss
+                    best_params = params
+                
+                if verbose:
+                    print(f"  Step {step:4d}: Loss = {loss:.6f}")
+        
+        # 最終結果
+        final_loss = loss_fn_jax(best_params, exps, mat)
+        
+        if verbose:
+            print(f"\n  最終Loss: {final_loss:.6f}")
+            print(f"  総ステップ数: {n_steps}")
+        
+        return best_params
 
 # =============================================================================
 # Section 3: CUDA版実装（高速化）
@@ -1195,8 +1461,8 @@ def evaluate_flc_fit(experimental: List[FLCPoint], predicted: List[Tuple[float, 
 
 if __name__ == "__main__":
     print("="*80)
-    print(" EDRパラメータフィッティング統合版 v3.2 (CPU + CUDA)")
-    print(" Miosync, Inc. / Nidec Corporation")
+    print(" EDRパラメータフィッティング統合版 v4.0 (CPU + CUDA + JAX)")
+    print(" Miosync, Inc. / Neural EDR Architecture")
     print("="*80)
     
     # 材料パラメータ
@@ -1213,14 +1479,19 @@ if __name__ == "__main__":
     edr_init = EDRParams()
     benchmark_cpu_vs_cuda(exps, mat, edr_init, n_candidates=100)
     
-    # CPU版フィッティング（デモ）
+    # 🆕 Hybrid最適化実行
     print("\n" + "="*80)
-    print(" CPU版フィッティング実行（デモ）")
+    print(" Hybrid最適化実行（JAX + L-BFGS-B）")
     print("="*80)
     
-    edr_fit, info = fit_edr_params_staged_v2(exps, flc_data, mat, verbose=True)
+    edr_fit, info = fit_edr_params_hybrid(
+        exps, flc_data, mat,
+        use_jax=True,  # JAXを使用
+        verbose=True
+    )
     
     print("\n[最終結果]")
+    print(f"  使用手法: {'JAX+AdamW → L-BFGS-B' if info['used_jax'] else 'L-BFGS-B のみ'}")
     print(f"  V0: {edr_fit.V0:.2e} Pa")
     print(f"  K_scale: {edr_fit.K_scale:.3f}")
     print(f"  triax_sens: {edr_fit.triax_sens:.3f}")
