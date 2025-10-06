@@ -224,6 +224,116 @@ def get_path_k_scale(beta: float, edr: EDRParams) -> float:
         return edr.K_scale
 
 # -----------------------------------------------------------------------------
+# 2.2) メインシミュレーション関数（JAX版）
+# -----------------------------------------------------------------------------
+
+@jit
+def simulate_lambda_jax(schedule, mat, params):
+    """純JAX版シミュレーション（完全実装）"""
+    
+    # scheduleから配列取得
+    epsM = schedule["eps_maj"]
+    epsm = schedule["eps_min"]
+    triax = schedule["triax"]
+    mu = schedule["mu"]
+    pN = schedule["pN"]
+    vslip = schedule["vslip"]
+    htc = schedule["htc"]
+    Tdie = schedule["Tdie"]
+    contact = schedule["contact"]
+    
+    # 時間差分
+    dt = (schedule["t"][-1] - schedule["t"][0]) / (len(schedule["t"]) - 1)
+    
+    # ひずみ速度
+    epsM_dot = jnp.gradient(epsM, dt)
+    epsm_dot = jnp.gradient(epsm, dt)
+    
+    # 平均β（経路依存K_scale用）
+    beta_avg = jnp.mean(epsm / (epsM + 1e-10))
+    k_scale_path = get_k_scale_smooth_jax(beta_avg, params)
+    
+    # scanで時間発展を計算
+    def time_step(carry, inputs):
+        T, cv, rho_d, ep_eq, h_eff, eps3, beta_hist = carry
+        epsM_dot_t, epsm_dot_t, triax_t, mu_t, pN_t, vslip_t, htc_t, Tdie_t, contact_t = inputs
+        
+        # 相当ひずみ速度
+        epdot_eq = equiv_strain_rate_jax(epsM_dot_t, epsm_dot_t)
+        
+        # 板厚更新
+        d_eps3 = -(epsM_dot_t + epsm_dot_t) * dt
+        eps3_new = eps3 + d_eps3
+        h_eff_new = jnp.maximum(mat["h0"] * jnp.exp(eps3_new), 0.2 * mat["h0"])
+        
+        # 熱収支
+        q_fric = mu_t * pN_t * vslip_t * contact_t
+        dTdt = (2.0 * htc_t * (Tdie_t - T) + 2.0 * params["chi"] * q_fric) / (mat["rho"] * mat["cp"] * h_eff_new)
+        dTdt = jnp.clip(dTdt, -1000.0, 1000.0)
+        T_new = jnp.clip(T + dTdt * dt, 200.0, 2000.0)
+        
+        # 欠陥更新
+        rho_d_new = step_rho_jax(rho_d, epdot_eq, T, dt)
+        cv_new = step_cv_jax(cv, T, rho_d_new, dt)
+        
+        # K計算
+        K_th = mat["rho"] * mat["cp"] * jnp.maximum(dTdt, 0.0)
+        sigma_eq = flow_stress_jax(ep_eq, epdot_eq, mat["sigma0"], mat["n"], mat["m"], mat["r_value"], T)
+        K_pl = 0.9 * sigma_eq * epdot_eq
+        K_fr = (2.0 * params["chi"] * q_fric) / h_eff_new
+        
+        # β移動平均（簡易版：直近値のみ）
+        beta_inst = epsm_dot_t / (epsM_dot_t + 1e-8)
+        beta_smooth = beta_inst  # TODO: 履歴平均実装
+        
+        # K_total
+        K_total = k_scale_path * (K_th + K_pl + K_fr)
+        K_total *= beta_multiplier_jax(beta_smooth, params["beta_A"], params["beta_bw"])
+        K_total = jnp.maximum(K_total, 0.0)
+        
+        # V_eff
+        T_ratio = jnp.minimum((T - 273.15) / (1500.0 - 273.15), 1.0)
+        temp_factor = 1.0 - 0.5 * T_ratio
+        V_eff = params["V0"] * temp_factor * (1.0 - params["av"] * cv - params["ad"] * jnp.sqrt(jnp.maximum(rho_d, 1e10)))
+        V_eff = jnp.maximum(V_eff, 0.01 * params["V0"])
+        
+        # 三軸度補正
+        D_triax = jnp.exp(-params["triax_sens"] * jnp.maximum(triax_t, 0.0))
+        
+        # Λ計算
+        Lambda = K_total / jnp.maximum(V_eff * D_triax, 1e7)
+        Lambda = jnp.minimum(Lambda, 10.0)
+        
+        # 相当塑性ひずみ更新
+        ep_eq_new = ep_eq + epdot_eq * dt
+        
+        new_carry = (T_new, cv_new, rho_d_new, ep_eq_new, h_eff_new, eps3_new, beta_hist)
+        return new_carry, Lambda
+    
+    # 初期状態
+    init_carry = (
+        293.15,  # T
+        1e-7,    # cv
+        1e11,    # rho_d
+        0.0,     # ep_eq
+        mat["h0"], # h_eff
+        0.0,     # eps3
+        jnp.zeros(5)  # beta_hist
+    )
+    
+    # 入力配列
+    inputs = (epsM_dot[:-1], epsm_dot[:-1], triax[:-1], mu[:-1], 
+              pN[:-1], vslip[:-1], htc[:-1], Tdie[:-1], contact[:-1])
+    
+    # scan実行
+    _, Lambdas = jax.lax.scan(time_step, init_carry, inputs)
+    
+    # Damage積分
+    Damage = jnp.cumsum(jnp.maximum(Lambdas - params["Lambda_crit"], 0.0) * dt)
+    
+    return {"Lambda": Lambdas, "Damage": Damage}
+
+# -----------------------------------------------------------------------------
 # 2.2) メインシミュレーション関数（CPU版）
 # -----------------------------------------------------------------------------
 
@@ -439,6 +549,34 @@ def loss_for_flc(flc_pts: List[FLCPoint],
         )
         err += w * ((Em - p.major_limit)**2 + (em - p.minor_limit)**2)
     return err / max(len(flc_pts), 1)
+
+def loss_single_exp_jax(schedule_dict, mat_dict, edr_dict, failed):
+    """単一実験の損失（完全JAX版）"""
+    # JAX版シミュレーション呼び出し
+    res = simulate_lambda_jax(schedule_dict, mat_dict, edr_dict)
+    
+    peak = jnp.max(res["Lambda"])
+    D_end = res["Damage"][-1]
+    
+    # 分岐レスで損失計算
+    margin = 0.08
+    Dcrit = 0.01
+    delta = 0.03
+    
+    # failed == 1の場合の損失
+    peak_penalty = jnp.maximum(0.0, edr_dict["Lambda_crit"] - peak)
+    D_penalty = jnp.maximum(0.0, Dcrit - D_end)
+    loss_fail = 10.0 * (peak_penalty**2 + D_penalty**2)
+    
+    # failed == 0の場合の損失
+    loss_safe = jnp.where(
+        peak > edr_dict["Lambda_crit"] - delta,
+        (peak - (edr_dict["Lambda_crit"] - delta))**2 * 3.0,
+        0.0
+    )
+    
+    # failedで切り替え
+    return jnp.where(failed == 1, loss_fail, loss_safe)
 
 # -----------------------------------------------------------------------------
 # 2.4) 段階的フィッティング（CPU版）
@@ -931,6 +1069,73 @@ if JAX_AVAILABLE:
             print(f"  総ステップ数: {n_steps}")
         
         return best_params
+
+
+# -----------------------------------------------------------------------------
+# 2.８) JAX版ヘルパー関数群
+# -----------------------------------------------------------------------------
+
+
+@jit
+def triax_from_path_jax(beta):
+    b = jnp.clip(beta, -0.95, 1.0)
+    return (1.0 + b) / (jnp.sqrt(3.0) * jnp.sqrt(1.0 + b + b*b))
+
+@jit 
+def equiv_strain_rate_jax(epsM_dot, epsm_dot):
+    sqrt_2_3 = 0.8164965809277260
+    return sqrt_2_3 * jnp.sqrt(
+        (epsM_dot - epsm_dot)**2 + epsM_dot**2 + epsm_dot**2
+    )
+
+@jit
+def flow_stress_jax(ep_eq, epdot_eq, sigma0, n, m, r_value, T):
+    Tref = 293.15
+    alpha = 3e-4
+    rate_fac = jnp.power(jnp.maximum(epdot_eq, 1e-6), m)
+    aniso = (2.0 + r_value) / 3.0
+    temp_fac = 1.0 - alpha * jnp.maximum(T - Tref, 0.0)
+    return sigma0 * temp_fac * jnp.power(1.0 + ep_eq, n) * rate_fac / aniso
+
+@jit
+def step_cv_jax(cv, T, rho_d, dt):
+    kB_eV = 8.617e-5
+    c0 = 1e-6
+    Ev_eV = 1.0
+    tau0 = 1e-3
+    Q_eV = 0.8
+    k_ann = 1e6
+    k_sink = 1e-15
+    
+    cv_eq = c0 * jnp.exp(-Ev_eV / (kB_eV * T))
+    tau = tau0 * jnp.exp(Q_eV / (kB_eV * T))
+    dcv = (cv_eq - cv) / tau - k_ann * cv**2 - k_sink * cv * rho_d
+    return cv + dcv * dt
+
+@jit
+def step_rho_jax(rho_d, epdot_eq, T, dt):
+    A = 1e14
+    B = 1e-4
+    Qv_eV = 0.8
+    kB_eV = 8.617e-5
+    Dv = 1e-6 * jnp.exp(-Qv_eV / (kB_eV * T))
+    drho = A * jnp.maximum(epdot_eq, 0.0) - B * rho_d * Dv
+    return jnp.maximum(rho_d + drho * dt, 1e10)
+
+@jit
+def get_k_scale_smooth_jax(beta, params):
+    """滑らかなK_scale選択（分岐レス）"""
+    w_draw = jnp.exp(-((beta + 0.5) / 0.1)**2)
+    w_plane = jnp.exp(-(beta / 0.1)**2)
+    w_biax = jnp.exp(-((beta - 0.5) / 0.2)**2)
+    w_else = 1.0 - jnp.maximum(w_draw, jnp.maximum(w_plane, w_biax))
+    
+    w_sum = w_draw + w_plane + w_biax + w_else + 1e-8
+    
+    return (params["K_scale_draw"] * w_draw + 
+            params["K_scale_plane"] * w_plane +
+            params["K_scale_biax"] * w_biax +
+            params["K_scale"] * w_else) / w_sum
 
 # =============================================================================
 # Section 3: CUDA版実装（高速化）
