@@ -1,21 +1,29 @@
 """
-BANKAI - Bond-vector ANalysis of Kinetic Amino acid Initiator
-==============================================================
+GETTER One
+==========
 
-GPU-accelerated sub-picosecond causal cascade detection
-in GROMACS molecular dynamics trajectories.
+Geometric Event-driven Tensor-based
+Time-series Extraction & Recognition
+
+Omnidimensional Network Engine
+
+Discrete geometric structural change detection
+and causal network extraction for N-dimensional time series.
 
 Usage:
-    import bankai
-    from bankai import MDLambda3DetectorGPU, TwoStageAnalyzerGPU
+    from getter_one.data import load
+    from getter_one.structures import LambdaStructuresCore
+    from getter_one.analysis import NetworkAnalyzerCore, assess_confidence
 
 CLI:
-    $ bankai-run --help
-    $ python -m bankai --help
+    $ getter-one-loader load data.csv --target y -o prepared.csv
+    $ getter-one-loader merge a.csv b.json --time date -o merged.csv
 
 Author: Masamichi Iizumi (Miosync, Inc.)
 License: MIT
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -25,14 +33,14 @@ from typing import Any
 # Version
 # ===============================
 
-__version__ = "1.1.6"
+__version__ = "0.1.0"
 __author__ = "Masamichi Iizumi"
 
 # ===============================
 # Logging
 # ===============================
 
-logger = logging.getLogger("bankai")
+logger = logging.getLogger("getter_one")
 _handler = logging.StreamHandler()
 _handler.setFormatter(
     logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -79,12 +87,13 @@ class _GPUEnvironment:
                 self.cuda_version = self._cuda_ver(cp)
                 self.compute_capability = self._compute_cap(cp)
                 logger.info(
-                    f"GPU detected: {self.gpu_name} ({self.gpu_memory:.1f} GB, CUDA {self.cuda_version})"
+                    f"GPU detected: {self.gpu_name} "
+                    f"({self.gpu_memory:.1f} GB, CUDA {self.cuda_version})"
                 )
             else:
-                logger.warning("No GPU devices found")
+                logger.info("No GPU devices found - running in CPU mode")
         except ImportError:
-            logger.warning("CuPy not installed - GPU features disabled")
+            logger.info("CuPy not installed - running in CPU mode")
         except Exception as e:
             logger.warning(f"GPU detection failed: {e}")
 
@@ -166,7 +175,7 @@ def set_gpu_device(device_id: int) -> None:
 
 
 def set_log_level(level: str = "INFO") -> None:
-    """bankai パッケージのログレベルを設定"""
+    """GETTER One パッケージのログレベルを設定"""
     numeric = getattr(logging, level.upper(), None)
     if not isinstance(numeric, int):
         raise ValueError(f"Invalid log level: {level}")
@@ -177,9 +186,9 @@ def set_log_level(level: str = "INFO") -> None:
 # GPU Memory Limit (env var)
 # ===============================
 
-if GPU_AVAILABLE and "BANKAI_GPU_MEMORY_LIMIT" in os.environ:
+if GPU_AVAILABLE and "GETTER_ONE_GPU_MEMORY_LIMIT" in os.environ:
     try:
-        _limit_gb = float(os.environ["BANKAI_GPU_MEMORY_LIMIT"])
+        _limit_gb = float(os.environ["GETTER_ONE_GPU_MEMORY_LIMIT"])
         import cupy as _cp
 
         _cp.cuda.MemoryPool().set_limit(size=int(_limit_gb * 1024**3))
@@ -189,7 +198,7 @@ if GPU_AVAILABLE and "BANKAI_GPU_MEMORY_LIMIT" in os.environ:
         logger.warning(f"Failed to set GPU memory limit: {e}")
 
 # Debug mode
-if os.environ.get("BANKAI_DEBUG", "").lower() in ("1", "true", "yes"):
+if os.environ.get("GETTER_ONE_DEBUG", "").lower() in ("1", "true", "yes"):
     set_log_level("DEBUG")
 
 # ===============================
@@ -211,26 +220,15 @@ __all__ = [
     "get_gpu_info",
     "set_gpu_device",
     "set_log_level",
-    # Core classes (lazy)
-    "MDConfig",
-    "ResidueAnalysisConfig",
-    "MDLambda3DetectorGPU",
-    "TwoStageAnalyzerGPU",
-    # Functions (lazy)
-    "perform_two_stage_analysis_gpu",
-    # Result types (lazy)
-    "MDLambda3Result",
-    "TwoStageLambda3Result",
-    "ResidueLevelAnalysis",
-    "ResidueEvent",
-    # Visualization (lazy)
-    "Lambda3VisualizerGPU",
-    "CausalityVisualizerGPU",
-    # Errors (lazy)
-    "BankaiError",
-    "GPUMemoryError",
-    "GPUNotAvailableError",
 ]
+
+# Lazy-importable names (via __getattr__):
+#   Data:       load, merge, from_dataframe, from_numpy, GetterDataset
+#   Structures: LambdaStructuresCore, LambdaCoreConfig
+#   Analysis:   NetworkAnalyzerCore, NetworkResult, DimensionLink,
+#               CooperativeEventNetwork, assess_confidence, ConfidenceReport,
+#               EventConfidence, BoundaryConfidence, CausalLinkConfidence,
+#               SyncConfidence
 
 # ===============================
 # Lazy Imports
@@ -240,64 +238,48 @@ __all__ = [
 def __getattr__(name: str):
     """遅延インポートで起動時間を最小化"""
 
-    # --- Config ---
-    if name == "MDConfig":
-        from bankai.analysis.md_lambda3_detector_gpu import MDConfig
+    # --- Data ---
+    _data_names = {"load", "merge", "from_dataframe", "from_numpy", "GetterDataset"}
+    if name in _data_names:
+        from getter_one.data import loader as _loader
 
-        return MDConfig
+        return getattr(_loader, name)
 
-    if name == "ResidueAnalysisConfig":
-        from bankai.analysis.two_stage_analyzer_gpu import ResidueAnalysisConfig
+    # --- Structures ---
+    if name == "LambdaStructuresCore":
+        from getter_one.structures.lambda_structures_core import LambdaStructuresCore
 
-        return ResidueAnalysisConfig
+        return LambdaStructuresCore
 
-    # --- Core classes ---
-    if name == "MDLambda3DetectorGPU":
-        from bankai.analysis.md_lambda3_detector_gpu import MDLambda3DetectorGPU
+    if name == "LambdaCoreConfig":
+        from getter_one.structures.lambda_structures_core import LambdaCoreConfig
 
-        return MDLambda3DetectorGPU
+        return LambdaCoreConfig
 
-    if name == "TwoStageAnalyzerGPU":
-        from bankai.analysis.two_stage_analyzer_gpu import TwoStageAnalyzerGPU
-
-        return TwoStageAnalyzerGPU
-
-    # --- Functions ---
-    if name == "perform_two_stage_analysis_gpu":
-        from bankai.analysis.two_stage_analyzer_gpu import (
-            perform_two_stage_analysis_gpu,
-        )
-
-        return perform_two_stage_analysis_gpu
-
-    # --- Result types ---
-    _result_types = {
-        "MDLambda3Result",
-        "TwoStageLambda3Result",
-        "ResidueLevelAnalysis",
-        "ResidueEvent",
+    # --- Analysis: Network ---
+    _network_names = {
+        "NetworkAnalyzerCore",
+        "NetworkResult",
+        "DimensionLink",
+        "CooperativeEventNetwork",
     }
-    if name in _result_types:
-        from bankai import models as _models
+    if name in _network_names:
+        from getter_one.analysis import network_analyzer_core as _net
 
-        return getattr(_models, name)
+        return getattr(_net, name)
 
-    # --- Visualization ---
-    if name == "Lambda3VisualizerGPU":
-        from bankai.visualization import Lambda3VisualizerGPU
+    # --- Analysis: Confidence ---
+    _confidence_names = {
+        "assess_confidence",
+        "ConfidenceReport",
+        "EventConfidence",
+        "BoundaryConfidence",
+        "CausalLinkConfidence",
+        "SyncConfidence",
+    }
+    if name in _confidence_names:
+        from getter_one.analysis import confidence_kit as _conf
 
-        return Lambda3VisualizerGPU
-
-    if name == "CausalityVisualizerGPU":
-        from bankai.visualization import CausalityVisualizerGPU
-
-        return CausalityVisualizerGPU
-
-    # --- Errors ---
-    _error_types = {"BankaiError", "GPUMemoryError", "GPUNotAvailableError"}
-    if name in _error_types:
-        from bankai import errors as _errors
-
-        return getattr(_errors, name)
+        return getattr(_conf, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
