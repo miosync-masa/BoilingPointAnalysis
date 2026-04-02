@@ -333,26 +333,3 @@ class LambdaStructuresCore:
                     f"   {key}: min={np.min(data):.3e}, max={np.max(data):.3e}, "
                     f"mean={np.mean(data):.3e}, std={np.std(data):.3e}"
                 )
-
-    # ================================================================
-    # 互換性ヘルパー: md_features dict からの呼び出しにも対応
-    # ================================================================
-
-    def compute_from_md_features(
-        self,
-        md_features: dict[str, np.ndarray],
-        window_steps: int,
-    ) -> dict[str, np.ndarray]:
-        """
-        md_features dict 経由での呼び出し（後方互換性）
-
-        既存の BANKAI-MD パイプラインからも呼べるようにする。
-        md_features["com_positions"] を state_vectors として使用。
-        """
-        if "com_positions" not in md_features:
-            raise ValueError("com_positions not found in md_features")
-
-        return self.compute_lambda_structures(
-            state_vectors=md_features["com_positions"],
-            window_steps=window_steps,
-        )
