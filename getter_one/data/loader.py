@@ -24,27 +24,6 @@ GETTER One - Data Loader
       time_column="date",
   )
 
-# ファイル情報を見る
-python -m getter_one.data.loader info weather.csv
-
-# 単体読み込み＆正規化＆ターゲット分離
-python -m getter_one.data.loader load weather.csv \
-  --target precipitation \
-  --normalize range \
-  -o prepared.csv
-
-# 複数ファイルをマージ
-python -m getter_one.data.loader merge \
-  weather.csv air_quality.json solar.parquet \
-  --time date \
-  --target precipitation \
-  -o merged.csv
-
-# 出力フォーマットは拡張子で自動判別
--o output.csv   → CSV
--o output.npy   → NumPy配列
--o output.npz   → NumPy複数配列（dimension_names付き）
-
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -54,7 +33,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+
 
 import numpy as np
 import pandas as pd
@@ -77,9 +56,9 @@ class GetterDataset:
     """
     state_vectors: np.ndarray                  # (n_frames, n_dims)
     dimension_names: list[str]                 # 各次元の名前
-    timestamps: Optional[np.ndarray] = None    # タイムスタンプ（あれば）
-    target: Optional[np.ndarray] = None        # ターゲット変数（あれば）
-    target_name: Optional[str] = None          # ターゲット変数名
+    timestamps: np.ndarray | None = None    # タイムスタンプ（あれば）
+    target: np.ndarray | None = None        # ターゲット変数（あれば）
+    target_name: str | None = None          # ターゲット変数名
     metadata: dict = field(default_factory=dict)
 
     @property
@@ -104,11 +83,11 @@ class GetterDataset:
 # ============================================================
 
 def load(
-    path: Union[str, Path],
-    target: Optional[str] = None,
-    time_column: Optional[str] = None,
-    columns: Optional[list[str]] = None,
-    exclude_columns: Optional[list[str]] = None,
+    path: str | Path,
+    target: str | None = None,
+    time_column: str | None = None,
+    columns: list[str] | None = None,
+    exclude_columns: list[str] | None = None,
     normalize: str = "range",
     dropna: bool = True,
     dtype: type = np.float64,
@@ -187,10 +166,10 @@ def load(
 
 def from_dataframe(
     df: pd.DataFrame,
-    target: Optional[str] = None,
-    time_column: Optional[str] = None,
-    columns: Optional[list[str]] = None,
-    exclude_columns: Optional[list[str]] = None,
+    target: str | None = None,
+    time_column: str | None = None,
+    columns: list[str] | None = None,
+    exclude_columns: list[str] | None = None,
     normalize: str = "range",
     dropna: bool = True,
     dtype: type = np.float64,
@@ -218,10 +197,10 @@ def from_dataframe(
 
 def from_numpy(
     data: np.ndarray,
-    dimension_names: Optional[list[str]] = None,
-    timestamps: Optional[np.ndarray] = None,
-    target: Optional[np.ndarray] = None,
-    target_name: Optional[str] = None,
+    dimension_names: list[str] | None = None,
+    timestamps: np.ndarray | None = None,
+    target: np.ndarray | None = None,
+    target_name: str | None = None,
     normalize: str = "range",
 ) -> GetterDataset:
     """
@@ -255,9 +234,9 @@ def from_numpy(
 
 
 def merge(
-    paths: list[Union[str, Path]],
+    paths: list[str | Path],
     time_column: str = "date",
-    target: Optional[str] = None,
+    target: str | None = None,
     normalize: str = "range",
     dropna: bool = True,
     how: str = "inner",
@@ -363,7 +342,7 @@ def _load_json(path: Path, **kwargs) -> pd.DataFrame:
 
 def _load_npy(
     path: Path,
-    target: Optional[str] = None,
+    target: str | None = None,
     normalize: str = "range",
     dtype: type = np.float64,
 ) -> GetterDataset:
@@ -398,7 +377,7 @@ def _load_npy(
 
 def _load_npz(
     path: Path,
-    target: Optional[str] = None,
+    target: str | None = None,
     normalize: str = "range",
     dtype: type = np.float64,
 ) -> GetterDataset:
@@ -453,10 +432,10 @@ def _load_npz(
 
 def _dataframe_to_dataset(
     df: pd.DataFrame,
-    target: Optional[str] = None,
-    time_column: Optional[str] = None,
-    columns: Optional[list[str]] = None,
-    exclude_columns: Optional[list[str]] = None,
+    target: str | None = None,
+    time_column: str | None = None,
+    columns: list[str] | None = None,
+    exclude_columns: list[str] | None = None,
     normalize: str = "range",
     dropna: bool = True,
     dtype: type = np.float64,
@@ -566,7 +545,7 @@ def _normalize(data: np.ndarray, method: str) -> np.ndarray:
         raise ValueError(f"Unknown normalize method: {method}. Use 'range', 'zscore', or 'none'")
 
 
-def _detect_time_column(df: pd.DataFrame) -> Optional[str]:
+def _detect_time_column(df: pd.DataFrame) -> str | None:
     """タイムスタンプ列を自動検出"""
     candidates = ["date", "datetime", "timestamp", "time", "Date", "DateTime", "Timestamp"]
     for c in candidates:
@@ -629,7 +608,7 @@ def _cli_info(args):
 def _cli_print_info(dataset: GetterDataset):
     """データセット情報を表示"""
     print(f"\n{'=' * 50}")
-    print(f"  GETTER One Dataset Info")
+    print("  GETTER One Dataset Info")
     print(f"{'=' * 50}")
     print(f"  Frames:     {dataset.n_frames}")
     print(f"  Dimensions: {dataset.n_dims}")
@@ -641,7 +620,7 @@ def _cli_print_info(dataset: GetterDataset):
     print(f"  Normalize:  {dataset.metadata.get('normalize', 'unknown')}")
 
     # 統計情報
-    print(f"\n  Statistics:")
+    print("\n  Statistics:")
     for i, name in enumerate(dataset.dimension_names):
         col = dataset.state_vectors[:, i]
         print(f"    {name:>30s}: mean={col.mean():.4f} std={col.std():.4f} "
