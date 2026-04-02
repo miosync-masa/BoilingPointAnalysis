@@ -1,5 +1,4 @@
-"""Allow running BANKAI as: python -m bankai [command] [options]"""
 
-from bankai.cli import main
+from getter-one.cli import main
 
 main()
