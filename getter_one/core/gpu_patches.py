@@ -2,6 +2,7 @@
 CuPy find_peaks互換性パッチ（改良版）
 引数の形式を自動調整
 """
+from __future__ import annotations
 
 import numpy as np
 
