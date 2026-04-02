@@ -3,6 +3,7 @@ Lambda³ GPU版トポロジカル破れ検出モジュール
 構造フローのトポロジカルな破れをGPUで高速検出
 CuPy RawKernelベース（PTX 8.4対応）
 """
+from __future__ import annotations
 
 import logging
 
