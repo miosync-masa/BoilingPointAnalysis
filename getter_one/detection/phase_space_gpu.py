@@ -1,5 +1,5 @@
 """
-位相空間解析モジュール（爆速カーネル版・完全リファクタリング版）
+getter_one位相空間解析モジュール（爆速カーネル版・完全リファクタリング版）
 高次元位相空間での異常検出とアトラクタ解析
 CuPy RawKernelによる超高速化実装（PTX 8.4対応）
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import numpy as np
 
@@ -612,7 +612,7 @@ class PhaseSpaceAnalyzerGPU(GPUBackend):
     """位相空間解析のGPU実装（爆速版・完全リファクタリング済み）"""
 
     def __init__(
-        self, config: Optional[PhaseSpaceConfig] = None, force_cpu: bool = False
+        self, config: PhaseSpaceConfig | None = None, force_cpu: bool = False
     ):
         """初期化"""
         super().__init__(force_cpu)
@@ -692,7 +692,7 @@ class PhaseSpaceAnalyzerGPU(GPUBackend):
         self.kernels_initialized = False
 
     def analyze_phase_space(
-        self, structures: dict[str, np.ndarray], embedding_params: Optional[dict] = None
+        self, structures: dict[str, np.ndarray], embedding_params: dict | None = None
     ) -> dict[str, Any]:
         """包括的な位相空間解析（爆速版）"""
         print("\n🚀 Ultra-Fast Phase Space Analysis on GPU...")
