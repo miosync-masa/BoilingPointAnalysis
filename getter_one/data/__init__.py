@@ -8,7 +8,7 @@ GETTER One - Data Module
 Supported: .csv, .tsv, .json, .parquet, .xlsx, .npy, .npz
 """
 
-from data.loader import (
+from .loader import (
     GetterDataset,
     from_dataframe,
     from_numpy,
