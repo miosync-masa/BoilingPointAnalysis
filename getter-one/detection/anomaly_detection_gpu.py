@@ -1,8 +1,8 @@
 """
-Lambda³ GPU版異常検出モジュール
 異常検出アルゴリズムの完全GPU実装
 CuPy RawKernelベース（PTX 8.4対応）
 """
+from __future__ import annotations
 
 import logging
 import warnings
