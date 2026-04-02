@@ -3,6 +3,7 @@ Lambda³ GPU版拡張異常検出モジュール
 周期的遷移、緩やかな遷移、構造ドリフトなどの長期的異常パターンをGPUで検出
 完全修正版 - 全てのcp直接参照をself.xpに置換
 """
+from __future__ import annotations
 
 import numpy as np
 from numba import cuda
