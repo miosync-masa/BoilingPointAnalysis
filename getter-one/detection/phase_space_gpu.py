@@ -1,15 +1,10 @@
 """
-Lambda³ GPU版位相空間解析モジュール（爆速カーネル版・完全リファクタリング版）
+位相空間解析モジュール（爆速カーネル版・完全リファクタリング版）
 高次元位相空間での異常検出とアトラクタ解析
 CuPy RawKernelによる超高速化実装（PTX 8.4対応）
-
-主な改善点：
-- float型とndarray型の明確な区別
-- エラーハンドリングの強化
-- メモリ効率の最適化
-- 型ヒントの充実
-- ドキュメントの改善
 """
+
+from __future__ import annotations
 
 import logging
 import warnings
