@@ -599,10 +599,11 @@ def evaluate(output, gt):
 # Main benchmark
 # =====================================================================
 
-def run_benchmark():
+def run_benchmark(n_repeats=20, save_csv=True):
     print("=" * 70)
     print("  GETTER One vs Established Causal Inference Methods")
     print("  Synthetic Benchmark with Ground Truth")
+    print(f"  Repeats: {n_repeats}")
     print("  Built with 💕 by Masamichi & Tamaki")
     print("=" * 70)
 
@@ -620,7 +621,6 @@ def run_benchmark():
     else:
         print("  ⚠️ tigramite not installed - skipping PCMCI+")
 
-    n_repeats = 3
     all_rows = []
 
     for scenario_name, gen_fn in SCENARIOS.items():
@@ -629,9 +629,10 @@ def run_benchmark():
         print(f"{'─'*60}")
 
         for repeat in range(n_repeats):
-            seed = cfg.seed + repeat * 100
+            seed = cfg.seed + repeat * 7  # 素数ステップでseed分散
             df, gt = gen_fn(cfg, seed)
-            print(f"  [{gt.notes}] repeat={repeat}")
+            if repeat % 5 == 0:
+                print(f"  [{gt.notes}] repeat={repeat}/{n_repeats}")
 
             for adapter in methods:
                 t0 = time.time()
@@ -652,19 +653,33 @@ def run_benchmark():
     metric_cols = [c for c in results_df.columns if c not in ("scenario", "method", "repeat", "time_s")]
 
     print("\n" + "=" * 70)
-    print("  RESULTS: Per-Method Average")
+    print(f"  RESULTS: Per-Method Average (n={n_repeats} repeats)")
     print("=" * 70)
 
-    summary = results_df.groupby("method")[metric_cols + ["time_s"]].mean()
-    print(summary.to_string(float_format="%.3f"))
+    summary_mean = results_df.groupby("method")[metric_cols + ["time_s"]].mean()
+    summary_std = results_df.groupby("method")[metric_cols].std()
+    print(summary_mean.to_string(float_format="%.3f"))
+
+    # Mean ± Std table
+    print("\n" + "=" * 70)
+    print("  RESULTS: Mean ± Std")
+    print("=" * 70)
+    for method in summary_mean.index:
+        print(f"\n  {method}:")
+        for col in metric_cols:
+            m = summary_mean.loc[method, col]
+            s = summary_std.loc[method, col]
+            if not np.isnan(m):
+                print(f"    {col:>20s}: {m:.3f} ± {s:.3f}")
 
     # Composite score
     print("\n" + "=" * 70)
     print("  COMPOSITE SCORE (higher = better)")
     print("=" * 70)
 
-    for method in summary.index:
-        row = summary.loc[method]
+    composite_scores = {}
+    for method in summary_mean.index:
+        row = summary_mean.loc[method]
         f1d = row.get("edge_f1_dir", 0) if not np.isnan(row.get("edge_f1_dir", np.nan)) else 0
         f1u = row.get("edge_f1_undir", 0) if not np.isnan(row.get("edge_f1_undir", np.nan)) else 0
         lag = row.get("lag_mae", np.nan)
@@ -676,20 +691,47 @@ def run_benchmark():
         time_s = row.get("time_s", 1)
 
         composite = (f1d * 1.5 + f1u * 1.0 + lag_score * 1.0 + sign_score * 0.8 + spur_score * 0.8) / 5.1
+        composite_scores[method] = composite
         print(f"  {method:20s}: {composite:.3f}  (F1d={f1d:.3f} F1u={f1u:.3f} Lag={lag_score:.3f} Sign={sign_score:.3f} Spur={spur_score:.3f} | {time_s:.2f}s)")
+
+    # Rank
+    print("\n  🏆 Ranking:")
+    for rank, (method, score) in enumerate(sorted(composite_scores.items(), key=lambda x: x[1], reverse=True), 1):
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "  ")
+        print(f"    {medal} {rank}. {method}: {score:.3f}")
 
     # Per-scenario breakdown
     print("\n" + "=" * 70)
-    print("  PER-SCENARIO F1 (directed)")
+    print("  PER-SCENARIO F1 (directed) — Mean")
     print("=" * 70)
 
     pivot = results_df.groupby(["scenario", "method"])["edge_f1_dir"].mean().unstack(fill_value=np.nan)
     print(pivot.to_string(float_format="%.3f"))
 
+    print("\n" + "=" * 70)
+    print("  PER-SCENARIO F1 (directed) — Std")
+    print("=" * 70)
+
+    pivot_std = results_df.groupby(["scenario", "method"])["edge_f1_dir"].std().unstack(fill_value=np.nan)
+    print(pivot_std.to_string(float_format="%.3f"))
+
+    # Save CSV
+    if save_csv:
+        csv_path = f"benchmark_results_{n_repeats}repeats.csv"
+        results_df.to_csv(csv_path, index=False)
+        print(f"\n  📄 Raw results saved: {csv_path}")
+
     return results_df
 
 
 if __name__ == "__main__":
+    import argparse
     import logging
     logging.disable(logging.CRITICAL)
-    results = run_benchmark()
+
+    parser = argparse.ArgumentParser(description="GETTER One Causal Inference Benchmark")
+    parser.add_argument("-n", "--repeats", type=int, default=20, help="Number of repeats (default: 20)")
+    parser.add_argument("--no-csv", action="store_true", help="Don't save CSV results")
+    args = parser.parse_args()
+
+    results = run_benchmark(n_repeats=args.repeats, save_csv=not args.no_csv)
