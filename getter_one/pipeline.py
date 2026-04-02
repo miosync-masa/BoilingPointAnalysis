@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+
 
 import numpy as np
 
@@ -63,7 +63,7 @@ class PipelineConfig:
 
     # Report
     enable_report: bool = True
-    report_path: Optional[str] = None
+    report_path: str | None = None
 
     # General
     seed: int = 42
@@ -78,7 +78,7 @@ class PipelineConfig:
 class PipelineResult:
     """パイプライン全結果"""
     # 入力データ
-    dataset: Optional[GetterDataset] = None
+    dataset: GetterDataset | None = None
 
     # Λ³構造
     lambda_structures: dict[str, np.ndarray] = field(default_factory=dict)
@@ -89,17 +89,17 @@ class PipelineResult:
     anomaly_scores: dict = field(default_factory=dict)
 
     # Network
-    network: Optional[NetworkResult] = None
+    network: NetworkResult | None = None
 
     # Confidence
-    confidence: Optional[ConfidenceReport] = None
+    confidence: ConfidenceReport | None = None
 
     # Report
     report: str = ""
 
     # Metadata
     computation_time: float = 0.0
-    config: Optional[PipelineConfig] = None
+    config: PipelineConfig | None = None
 
 
 # ============================================================
@@ -108,7 +108,7 @@ class PipelineResult:
 
 def run(
     source,
-    config: Optional[PipelineConfig] = None,
+    config: PipelineConfig | None = None,
     **kwargs,
 ) -> PipelineResult:
     """
