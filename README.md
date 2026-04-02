@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://www.miosync.link/github/0_4.jpg" alt="Lambda³" width="400"/>
+</p>
+
 # GETTER One
 
 **Geometric Event-driven Tensor-based Time-series Extraction & Recognition**
