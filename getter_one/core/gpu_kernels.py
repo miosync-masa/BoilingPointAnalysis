@@ -6,10 +6,8 @@ CUDA Kernels for Lambda³ GPU
 めちゃくちゃ速い処理を実現しちゃう！
 
 by 環ちゃん
-
-⚡ 2025/08/11 修正: 全カーネル関数にGPU配列変換チェックを追加！
-   NumPy配列が来てもエラーにならないように対応したよ〜！
 """
+from __future__ import annotations
 
 import logging
 
@@ -26,7 +24,7 @@ except ImportError:
     cp = None
     cuda = None
 
-logger = logging.getLogger("bankai.core.kernels")
+logger = logging.getLogger("getter_one.core.kernels")
 
 # ===============================
 # Kernel Code Templates
