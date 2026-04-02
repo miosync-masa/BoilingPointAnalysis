@@ -15,7 +15,6 @@ import os
 import random
 import sys
 
-
 from getter_one import GPU_AVAILABLE, GPU_MEMORY, GPU_NAME, __version__, get_gpu_info
 
 # ===============================
