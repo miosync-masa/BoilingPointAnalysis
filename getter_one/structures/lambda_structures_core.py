@@ -81,7 +81,7 @@ class LambdaStructuresCore:
             - lambda_FF: 二次フロー (n_frames-2, n_dims)
             - lambda_FF_mag: 二次フロー大きさ (n_frames-2,)
             - rho_T: テンション場 (n_frames,)
-            - Q_lambda: トポロジカルチャージ (n_frames-1,)
+            - Q_lambda: トポロジカル(n_frames-1,)
             - Q_cumulative: 累積チャージ (n_frames-1,)
             - sigma_s: 構造同期率 (n_frames,)
             - structural_coherence: コヒーレンス (n_frames-1,)
@@ -109,7 +109,7 @@ class LambdaStructuresCore:
         # 3. ρT - テンション場
         rho_T = self._compute_rho_T(state_vectors, window_steps)
 
-        # 4. Q_Λ - トポロジカルチャージ
+        # 4. Q_Λ - トポロジカル
         Q_lambda, Q_cumulative = self._compute_Q_lambda(lambda_F, lambda_F_mag)
 
         # 5. σₛ - 構造同期率（★汎用版の核心！）
