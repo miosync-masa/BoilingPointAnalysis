@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+
 
 import numpy as np
 
@@ -31,7 +31,7 @@ def generate_report(
     network_result=None,
     confidence_report=None,
     dataset=None,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     title: str = "GETTER One Analysis Report",
 ) -> str:
     """
