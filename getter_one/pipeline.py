@@ -23,7 +23,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-
 import numpy as np
 
 from .analysis.confidence_kit import ConfidenceReport, assess_confidence
