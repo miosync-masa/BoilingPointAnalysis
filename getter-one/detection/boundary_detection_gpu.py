@@ -5,6 +5,8 @@ CuPy RawKernelベース（PTX 8.4対応）
 完全修正版 - 全てのcp直接参照をself.xpに置換
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 import numpy as np
