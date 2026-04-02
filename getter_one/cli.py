@@ -14,7 +14,7 @@ import argparse
 import os
 import random
 import sys
-from typing import Optional
+
 
 from getter_one import GPU_AVAILABLE, GPU_MEMORY, GPU_NAME, __version__, get_gpu_info
 
@@ -37,7 +37,7 @@ def _gpu_status_line() -> str:
     return "CPU Mode (install CuPy for GPU acceleration)"
 
 
-def print_banner(style: Optional[str] = None):
+def print_banner(style: str | None = None):
     if not _should_show_banner():
         return
 
@@ -119,7 +119,7 @@ def _banner_tamaki():
     """環ちゃんバナー"""
     faces = ["(◕‿◕)", "(｡♥‿♥｡)", "(✧ω✧)", "(*´▽`*)"]
     messages = [
-        "GETTER （ROBO→☓）One is online! Let's go!",
+        "GETTER One is online! Let's go!",
         "Structural changes? I'll find them!",
         "Bring me the data, Master!",
         "Causal network analysis, here I come!",
