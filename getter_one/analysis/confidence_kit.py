@@ -144,6 +144,7 @@ def assess_confidence(
     alpha: float = 0.05,
     n_permutations: int = 1000,
     n_bootstrap: int = 2000,
+    window_steps: int = 24,
     seed: int = 42,
 ) -> ConfidenceReport:
     """
@@ -190,7 +191,8 @@ def assess_confidence(
 
     # ① ΔΛCイベントの信頼度
     report.events = _assess_event_confidence(
-        state_vectors, lambda_structures, alpha, n_permutations, n_bootstrap, rng
+        state_vectors, lambda_structures, alpha, n_permutations, n_bootstrap, rng,
+        window_steps=window_steps,
     )
     report.n_significant_events = sum(1 for e in report.events if e.is_significant)
 
@@ -236,8 +238,16 @@ def _assess_event_confidence(
     n_perm: int,
     n_boot: int,
     rng: np.random.Generator,
+    window_steps: int = 24,
 ) -> list[EventConfidence]:
-    """ΔΛCイベントがノイズでないことを検定"""
+    """ΔΛCイベントがノイズでないことを検定
+
+    帰無仮説: 次元間の同期構造が存在しない場合、
+    観測されたΔΛCの大きさは偶然でも生じうるか？
+
+    シャッフルしたデータからΛ³全体（ΛF, ρT, σₛ）を再計算して
+    帰無分布を生成する。
+    """
     lf_mag = lambda_structures.get("lambda_F_mag", np.array([]))
     rho_t = lambda_structures.get("rho_T", np.array([]))
     sigma_s = lambda_structures.get("sigma_s", np.array([]))
@@ -257,31 +267,65 @@ def _assess_event_confidence(
         return []
 
     # パーミュテーション帰無分布の生成
-    null_max_dlc = np.zeros(n_perm)
+    # シャッフルしたデータからΛ³全体を再計算する
+    null_dlc_distributions = []
     for p in range(n_perm):
         # 各次元を独立にシャッフル → 構造的同期を破壊
         shuffled = state_vectors.copy()
         for d in range(state_vectors.shape[1]):
             shuffled[:, d] = rng.permutation(shuffled[:, d])
 
+        # ΛF再計算
         s_disp = np.diff(shuffled, axis=0)
         s_lf_mag = np.linalg.norm(s_disp, axis=1)
-        s_n = min(len(s_lf_mag), n)
-        s_dlc = rho_t[1:s_n + 1] * sigma_s[1:s_n + 1] * s_lf_mag[:s_n]
-        null_max_dlc[p] = np.max(s_dlc) if len(s_dlc) > 0 else 0.0
+
+        # ρT再計算（rolling std）
+        s_n_frames = len(shuffled)
+        s_rho_t = np.zeros(s_n_frames)
+        half_w = window_steps // 2
+        for t in range(s_n_frames):
+            start = max(0, t - half_w)
+            end = min(len(s_lf_mag), t + half_w + 1)
+            if end > start:
+                s_rho_t[t] = np.std(s_lf_mag[start:end])
+
+        # σₛ再計算（cross-dim correlation）
+        s_sigma_s = np.zeros(s_n_frames)
+        n_dims = shuffled.shape[1]
+        for t in range(s_n_frames):
+            start = max(0, t - half_w)
+            end = min(len(s_disp), t + half_w + 1)
+            if end - start >= 3 and n_dims >= 2:
+                window_disp = s_disp[start:end]
+                try:
+                    corr = np.corrcoef(window_disp.T)
+                    mask = ~np.eye(n_dims, dtype=bool)
+                    s_sigma_s[t] = np.mean(np.abs(corr[mask]))
+                except (ValueError, FloatingPointError):
+                    s_sigma_s[t] = 0.0
+
+        # ΔΛC再計算
+        s_m = min(len(s_lf_mag), s_n_frames - 1)
+        s_dlc = s_rho_t[1:s_m + 1] * s_sigma_s[1:s_m + 1] * s_lf_mag[:s_m]
+        null_dlc_distributions.append(s_dlc)
+
+    # 帰無分布: 全シャッフルの全フレームのΔΛCを統合
+    null_all = np.concatenate(null_dlc_distributions)
 
     events = []
     for frame in event_frames:
         observed = dlc[frame]
 
-        # p値: 帰無分布で観測値以上が出る確率
-        p_value = (1 + np.sum(null_max_dlc >= observed)) / (n_perm + 1)
+        # p値: 帰無分布全体で観測値以上が出る確率
+        p_value = float(np.mean(null_all >= observed))
+        # 最小p値の補正
+        p_value = max(p_value, 1.0 / (len(null_all) + 1))
 
         # ブートストラップCI
         ci_lo, ci_hi = _bootstrap_ci_scalar(dlc, frame, n_boot, rng)
 
         # 効果量（Cohen's d）
-        effect = (observed - np.mean(dlc)) / max(np.std(dlc), 1e-10)
+        effect = (observed - np.mean(null_all)) / max(np.std(null_all), 1e-10)
 
         events.append(EventConfidence(
             frame=frame,
