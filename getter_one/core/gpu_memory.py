@@ -7,6 +7,7 @@ GPUメモリを効率的に管理するシステムだよ〜！💕
 
 by 環ちゃん
 """
+from __future__ import annotations
 
 import gc
 import logging
@@ -48,7 +49,7 @@ else:
     NDArray = Union[np.ndarray, "cp.ndarray"] if HAS_GPU else np.ndarray
 
 # Logger setup - グローバルスコープで定義
-logger = logging.getLogger("bankai.core.memory")
+logger = logging.getLogger("getter_one.core.memory")
 
 # ===============================
 # Data Classes
