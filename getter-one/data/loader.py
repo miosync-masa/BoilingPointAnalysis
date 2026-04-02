@@ -24,6 +24,27 @@ GETTER One - Data Loader
       time_column="date",
   )
 
+# ファイル情報を見る
+python -m getter_one.data.loader info weather.csv
+
+# 単体読み込み＆正規化＆ターゲット分離
+python -m getter_one.data.loader load weather.csv \
+  --target precipitation \
+  --normalize range \
+  -o prepared.csv
+
+# 複数ファイルをマージ
+python -m getter_one.data.loader merge \
+  weather.csv air_quality.json solar.parquet \
+  --time date \
+  --target precipitation \
+  -o merged.csv
+
+# 出力フォーマットは拡張子で自動判別
+-o output.csv   → CSV
+-o output.npy   → NumPy配列
+-o output.npz   → NumPy複数配列（dimension_names付き）
+
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -562,3 +583,147 @@ def _detect_time_column(df: pd.DataFrame) -> Optional[str]:
                 continue
 
     return None
+
+
+# ============================================================
+# CLI: コマンドラインから単体実行
+# ============================================================
+# Usage:
+#   python -m getter_one.data.loader load weather.csv --target precipitation -o prepared.csv
+#   python -m getter_one.data.loader merge weather.csv air.json --time date -o merged.csv
+#   python -m getter_one.data.loader info weather.csv
+# ============================================================
+
+def _cli_load(args):
+    """CLI: load サブコマンド"""
+    dataset = load(
+        args.file,
+        target=args.target,
+        time_column=args.time,
+        normalize=args.normalize,
+    )
+    _cli_print_info(dataset)
+    if args.output:
+        _cli_save(dataset, args.output)
+
+
+def _cli_merge(args):
+    """CLI: merge サブコマンド"""
+    dataset = merge(
+        args.files,
+        time_column=args.time or "date",
+        target=args.target,
+        normalize=args.normalize,
+    )
+    _cli_print_info(dataset)
+    if args.output:
+        _cli_save(dataset, args.output)
+
+
+def _cli_info(args):
+    """CLI: info サブコマンド"""
+    dataset = load(args.file, normalize="none")
+    _cli_print_info(dataset)
+
+
+def _cli_print_info(dataset: GetterDataset):
+    """データセット情報を表示"""
+    print(f"\n{'=' * 50}")
+    print(f"  GETTER One Dataset Info")
+    print(f"{'=' * 50}")
+    print(f"  Frames:     {dataset.n_frames}")
+    print(f"  Dimensions: {dataset.n_dims}")
+    print(f"  Columns:    {dataset.dimension_names}")
+    if dataset.target_name:
+        print(f"  Target:     {dataset.target_name}")
+    if dataset.timestamps is not None:
+        print(f"  Time range: {dataset.timestamps[0]} → {dataset.timestamps[-1]}")
+    print(f"  Normalize:  {dataset.metadata.get('normalize', 'unknown')}")
+
+    # 統計情報
+    print(f"\n  Statistics:")
+    for i, name in enumerate(dataset.dimension_names):
+        col = dataset.state_vectors[:, i]
+        print(f"    {name:>30s}: mean={col.mean():.4f} std={col.std():.4f} "
+              f"min={col.min():.4f} max={col.max():.4f}")
+
+    if dataset.target is not None:
+        t = dataset.target
+        print(f"    {'[TARGET] ' + dataset.target_name:>30s}: mean={t.mean():.4f} "
+              f"std={t.std():.4f} zero={100*(t==0).mean():.1f}%")
+
+
+def _cli_save(dataset: GetterDataset, output_path: str):
+    """データセットを保存"""
+    path = Path(output_path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".csv":
+        df = pd.DataFrame(dataset.state_vectors, columns=dataset.dimension_names)
+        if dataset.timestamps is not None:
+            df.insert(0, "date", dataset.timestamps)
+        if dataset.target is not None:
+            df[dataset.target_name or "target"] = dataset.target
+        df.to_csv(path, index=False)
+
+    elif suffix == ".npy":
+        np.save(path, dataset.state_vectors)
+
+    elif suffix == ".npz":
+        save_dict = {"state_vectors": dataset.state_vectors,
+                     "dimension_names": np.array(dataset.dimension_names)}
+        if dataset.timestamps is not None:
+            save_dict["timestamps"] = dataset.timestamps
+        if dataset.target is not None:
+            save_dict[dataset.target_name or "target"] = dataset.target
+        np.savez(path, **save_dict)
+
+    else:
+        raise ValueError(f"Unsupported output format: {suffix}")
+
+    print(f"\n  ✅ Saved: {path} ({path.stat().st_size / 1024:.1f} KB)")
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="getter-one-loader",
+        description="GETTER One Data Loader - Prepare data for GETTER One pipeline",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # load
+    p_load = subparsers.add_parser("load", help="Load and prepare a single file")
+    p_load.add_argument("file", help="Input file path")
+    p_load.add_argument("-o", "--output", help="Output file path (csv/npy/npz)")
+    p_load.add_argument("--target", help="Target column name")
+    p_load.add_argument("--time", help="Time column name")
+    p_load.add_argument("--normalize", default="range", choices=["range", "zscore", "none"])
+
+    # merge
+    p_merge = subparsers.add_parser("merge", help="Merge multiple files")
+    p_merge.add_argument("files", nargs="+", help="Input file paths")
+    p_merge.add_argument("-o", "--output", help="Output file path")
+    p_merge.add_argument("--target", help="Target column name")
+    p_merge.add_argument("--time", help="Time column name for merge key")
+    p_merge.add_argument("--normalize", default="range", choices=["range", "zscore", "none"])
+
+    # info
+    p_info = subparsers.add_parser("info", help="Show file info")
+    p_info.add_argument("file", help="Input file path")
+
+    args = parser.parse_args()
+
+    if args.command == "load":
+        _cli_load(args)
+    elif args.command == "merge":
+        _cli_merge(args)
+    elif args.command == "info":
+        _cli_info(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
