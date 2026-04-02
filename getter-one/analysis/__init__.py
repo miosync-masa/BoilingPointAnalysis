@@ -1,8 +1,22 @@
 """
-getter-oneU版解析モジュール
+GETTER One - Analysis Module
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+構造ネットワーク解析と信頼度判定 💕
+
+Components:
+    - NetworkAnalyzerCore: 次元間因果ネットワーク解析
+    - ConfidenceKit: 統計的信頼度判定（p値/CI/効果量）
 """
 
-# 🌐 Network Analyzer Core (domain-agnostic)
+from .confidence_kit import (
+    BoundaryConfidence,
+    CausalLinkConfidence,
+    ConfidenceReport,
+    EventConfidence,
+    SyncConfidence,
+    assess_confidence,
+)
 from .network_analyzer_core import (
     CooperativeEventNetwork,
     DimensionLink,
@@ -10,37 +24,17 @@ from .network_analyzer_core import (
     NetworkResult,
 )
 
-
 __all__ = [
-    # メイン検出器
-    # 🌐 Network Analyzer Core (domain-agnostic)
+    # Network Analyzer
     "NetworkAnalyzerCore",
     "NetworkResult",
     "DimensionLink",
     "CooperativeEventNetwork",
+    # Confidence Kit
+    "assess_confidence",
+    "ConfidenceReport",
+    "EventConfidence",
+    "BoundaryConfidence",
+    "CausalLinkConfidence",
+    "SyncConfidence",
 ]
-
-__version__ = "1.0.0"
-
-
-# ========================================
-# バージョン情報
-# ========================================
-
-def get_version_info():
-    """
-    Lambda³ GPU バージョン情報取得
-
-    Returns
-    -------
-    dict
-        バージョン情報
-    """
-    return {
-        "version": __version__,
-        "features": {
-            "bankai_core": True,
-            "gpu_acceleration": True,
-        },
-        "description": "Getter One",
-    }
