@@ -3,10 +3,10 @@ GPU Utilities and Base Classes - Refactored Version
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 GPUとCPUを賢く切り替える基底クラスと便利なユーティリティ集だよ〜！💕
-環ちゃんがリファクタリングして、メモリマネージャのバグも修正したよ！
 
 by 環ちゃん
 """
+from __future__ import annotations
 
 import logging
 import time
@@ -55,7 +55,7 @@ ArrayType = NDArray  # エイリアス
 # Logger Setup
 # ===============================
 
-logger = logging.getLogger("bankai.core.utils")
+logger = logging.getLogger("getter_one.core.utils")
 
 # ===============================
 # GPU Backend Base Class
