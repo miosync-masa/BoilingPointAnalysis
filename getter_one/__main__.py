@@ -1,4 +1,4 @@
 
-from getter-one.cli import main
+from getter_one.cli import main
 
 main()
