@@ -262,6 +262,7 @@ def run(
             alpha=config.alpha,
             n_permutations=config.n_permutations,
             n_bootstrap=config.n_bootstrap,
+            window_steps=config.window_steps,
             seed=config.seed,
         )
 
