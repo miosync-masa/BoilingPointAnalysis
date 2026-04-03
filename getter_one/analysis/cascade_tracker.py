@@ -2,6 +2,12 @@
 Cascade Tracker - Domain-Agnostic Cascade Chain Reconstruction
 ================================================================
 
+BANKAI-MD Third Impact Analytics の汎用版。
+閉じた系（タンパク質残基）→ 開いた系（N次元時系列）への拡張。
+
+Third Impact では残基の壁が系の境界だった。
+GETTER One では因果が途切れるところが動的な系の境界になる。
+
 Core Concept:
     複数の ΔΛC イベントを時系列で検出し、
     イベント間の因果チェーン（A→B→C→...）を再構成する。
@@ -1017,6 +1023,7 @@ class CascadeTracker:
         DAGから全てのカスケードチェーンを抽出
 
         根ノード（入次数 0）から DFS で全パスを列挙。
+        max_paths で組み合わせ爆発を防止。
         """
         # event_id → event のマッピング
         event_map = {e.event_id: e for e in events}
@@ -1027,25 +1034,49 @@ class CascadeTracker:
             for lnk in links
         }
 
-        # 入次数の計算
+        # ── DAG枝刈り: 各ノードから上位 max_children 本のみ ──
+        max_children = 3
+        pruned_dag: dict[int, list[int]] = {}
+        for node, children in dag.items():
+            if len(children) <= max_children:
+                pruned_dag[node] = children
+            else:
+                # causality_score の高い順に上位のみ保持
+                scored = []
+                for child in children:
+                    key = (node, child)
+                    score = link_map[key].causality_score if key in link_map else 0
+                    scored.append((child, score))
+                scored.sort(key=lambda x: x[1], reverse=True)
+                pruned_dag[node] = [c for c, _ in scored[:max_children]]
+
+        # 入次数の計算（枝刈り後のDAGで）
         in_degree: dict[int, int] = {e.event_id: 0 for e in events}
-        for link in links:
-            in_degree[link.to_event_id] = in_degree.get(link.to_event_id, 0) + 1
+        for node, children in pruned_dag.items():
+            for child in children:
+                in_degree[child] = in_degree.get(child, 0) + 1
 
         # 根ノード（因果の起点）
         roots = [eid for eid, deg in in_degree.items() if deg == 0]
 
-        # DFS で全パスを列挙
+        # DFS で全パスを列挙（max_paths で制限）
+        max_paths = self.max_chains * 10  # 十分な候補を生成
         chains = []
         chain_id = 0
 
         for root in roots:
-            # 全パスを列挙（分岐がある場合は複数パス）
-            paths = self._dfs_all_paths(root, dag)
+            paths = self._dfs_all_paths(
+                root, pruned_dag,
+                max_depth=15,
+                max_paths=max_paths - len(chains),
+            )
+
+            if len(chains) >= max_paths:
+                break
 
             for path in paths:
                 if len(path) < 2:
-                    continue  # 単独イベントはチェーンにならない
+                    continue
 
                 # チェーン構築
                 chain_links = []
@@ -1086,6 +1117,9 @@ class CascadeTracker:
                 chains.append(chain)
                 chain_id += 1
 
+                if len(chains) >= max_paths:
+                    break
+
         # 長さ × 因果スコアでソート
         chains.sort(
             key=lambda c: c.length * c.mean_causality,
@@ -1104,17 +1138,21 @@ class CascadeTracker:
         self,
         start: int,
         dag: dict[int, list[int]],
-        max_depth: int = 50,
+        max_depth: int = 15,
+        max_paths: int = 200,
     ) -> list[list[int]]:
         """
         DAG上のDFSで全パスを列挙
 
-        max_depth で暴走を防止（開いた系なので安全弁）
+        max_depth + max_paths で組み合わせ爆発を防止
         """
         all_paths: list[list[int]] = []
         stack: list[tuple[int, list[int]]] = [(start, [start])]
 
         while stack:
+            if len(all_paths) >= max_paths:
+                break
+
             node, path = stack.pop()
 
             if len(path) > max_depth:
@@ -1124,11 +1162,10 @@ class CascadeTracker:
             children = dag.get(node, [])
 
             if not children:
-                # 末端ノード → パス完成
                 all_paths.append(path)
             else:
                 for child in children:
-                    if child not in path:  # サイクル防止
+                    if child not in path:
                         stack.append((child, path + [child]))
 
         return all_paths
