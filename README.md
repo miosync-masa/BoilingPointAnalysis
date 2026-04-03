@@ -1,10 +1,13 @@
+<p align="center">
+  <img src="https://www.miosync.link/github/0_4.jpg" alt="Lambda³" width="400"/>
+</p>
+
 # GETTER One
 
 **Geometric Event-driven Tensor-based Time-series Extraction & Recognition**
 
 *Omnidimensional Network Engine*
 
-[![CI](https://github.com/miosync-masa/getter-one/actions/workflows/ci.yml/badge.svg)](https://github.com/miosync-masa/getter-one/actions)
 [![PyPI](https://img.shields.io/pypi/v/getter-one)](https://pypi.org/project/getter-one/)
 [![Python](https://img.shields.io/pypi/pyversions/getter-one)](https://pypi.org/project/getter-one/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
