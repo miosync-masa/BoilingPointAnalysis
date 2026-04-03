@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://www.miosync.link/github/0_4.jpg" alt="Lambda³" width="400"/>
-</p>
-
 # GETTER One
 
 **Geometric Event-driven Tensor-based Time-series Extraction & Recognition**
@@ -146,6 +142,8 @@ GETTER One detects **what changed and why**, not **what will happen next**. It c
 
 ## Benchmark Results
 
+### Standard Benchmark
+
 Causal inference benchmark against 5 established methods on synthetic data with ground truth (6 scenarios, 20 repeats each):
 
 | Method | Composite | F1 (dir) | Lag MAE | Sign Acc | Spurious |
@@ -154,7 +152,7 @@ Causal inference benchmark against 5 established methods on synthetic data with 
 | VAR Granger | 0.853 | 0.697 ± 0.353 | 0.010 ± 0.100 | 0.990 ± 0.100 | 0.050 ± 0.154 |
 | **GETTER One** | **0.821** | **0.792 ± 0.366** | **0.000 ± 0.000** | **1.000 ± 0.000** | 0.500 ± 0.000 |
 | Event XCorr | 0.537 | 0.534 ± 0.403 | 0.244 ± 0.825 | — | 0.300 ± 0.340 |
-| Transfer Entropy | 0.401 | 0.429 ± 0.360 | 0.961 ± 1.297 | — | 0.525 ± 0.255 |
+| Transfer Entropy | 0.446 | 0.432 ± 0.368 | 0.413 ± 1.396 | — | 0.525 ± 0.112 |
 | Graphical Lasso | 0.120 | — | — | — | 1.000 ± 0.000 |
 
 **Per-scenario F1 (directed):**
@@ -162,13 +160,39 @@ Causal inference benchmark against 5 established methods on synthetic data with 
 | Scenario | GETTER One | PCMCI+ | VAR Granger | TE | EventXCorr |
 |----------|-----------|--------|-------------|-----|------------|
 | S0 null | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
-| S1 delayed | **1.000 ± 0.000** | 0.825 ± 0.183 | 0.662 ± 0.141 | 0.669 ± 0.252 | 0.450 ± 0.446 |
-| S2 asymmetric | **0.950 ± 0.122** | 0.883 ± 0.163 | 0.658 ± 0.037 | 0.577 ± 0.235 | 0.520 ± 0.434 |
-| S5 confounder | 0.800 ± 0.000 | **0.990 ± 0.045** | 0.960 ± 0.082 | 0.729 ± 0.129 | 0.623 ± 0.213 |
-| S7 event delayed | **1.000 ± 0.000** | 0.825 ± 0.183 | 0.917 ± 0.148 | 0.350 ± 0.422 | 0.842 ± 0.206 |
-| S8 event asym | **1.000 ± 0.000** | 0.917 ± 0.148 | 0.983 ± 0.075 | 0.248 ± 0.291 | 0.767 ± 0.262 |
+| S1 delayed | **1.000 ± 0.000** | 0.825 ± 0.183 | 0.662 ± 0.141 | 0.645 ± 0.233 | 0.450 ± 0.446 |
+| S2 asymmetric | **0.950 ± 0.122** | 0.883 ± 0.163 | 0.658 ± 0.037 | 0.662 ± 0.177 | 0.520 ± 0.434 |
+| S5 confounder | 0.800 ± 0.000 | **0.990 ± 0.045** | 0.960 ± 0.082 | 0.734 ± 0.092 | 0.623 ± 0.213 |
+| S7 event delayed | **1.000 ± 0.000** | 0.825 ± 0.183 | 0.917 ± 0.148 | 0.342 ± 0.417 | 0.842 ± 0.206 |
+| S8 event asym | **1.000 ± 0.000** | 0.917 ± 0.148 | 0.983 ± 0.075 | 0.212 ± 0.356 | 0.767 ± 0.262 |
 
 GETTER One achieves **F1 = 1.000 with σ = 0.000** (perfectly deterministic) on all event-driven scenarios, with **zero lag error** and **perfect sign accuracy** across all 20 trials. Its closed-form computation produces identical results regardless of noise realization — a direct consequence of the displacement-based (diff) approach inherited from molecular dynamics trajectory analysis.
+
+### Hell Mode Robustness Benchmark
+
+Causal detection under non-stationary, non-linear, non-Gaussian conditions (8 scenarios × 5 repeats, ground truth: X0→X1 lag=2, X0→X2 lag=3):
+
+| Method | F1 | Precision | Recall | Lag MAE | Detected | Spurious |
+|--------|-----|-----------|--------|---------|----------|----------|
+| **GETTER One** | **0.394 ± 0.406** | **0.471** | 0.362 | **0.000** | **1.4** | **0.118** |
+| PCMCI+ | 0.376 ± 0.271 | 0.279 | 0.738 | 0.306 | 8.6 | 0.142 |
+| VAR Granger | 0.283 ± 0.308 | 0.217 | 0.475 | 0.630 | 7.5 | 0.260 |
+| Transfer Entropy | 0.164 ± 0.240 | 0.119 | 0.887 | 0.770 | 84.3 | 0.188 |
+
+**Per-scenario F1 (Hell Mode):**
+
+| Scenario | GETTER One | PCMCI+ | VAR Granger | TE |
+|----------|-----------|--------|-------------|-----|
+| H1 pulse | 0.513 | 0.494 | 0.431 | 0.385 |
+| H2 phase jump | **0.547** | 0.183 | 0.093 | 0.025 |
+| H3 bifurcation | 0.000 | 0.142 | 0.040 | 0.025 |
+| H4 cascade | 0.133 | **0.649** | 0.581 | 0.668 |
+| H5 resonance | **0.960** | 0.774 | 0.000 | 0.043 |
+| H6 decay | 0.533 | 0.428 | **0.813** | 0.044 |
+| H7 multi-hell | **0.467** | 0.238 | 0.304 | 0.029 |
+| H8 progressive | 0.000 | 0.100 | 0.000 | 0.092 |
+
+GETTER One achieves the **highest F1 and precision** under non-ideal conditions, with the **fewest detected links** (1.4 avg vs ground truth of 2) — demonstrating conservative, high-confidence detection rather than over-reporting. Each method has characteristic strengths: GETTER One excels at phase jumps and resonance, PCMCI+ at cascades, and VAR Granger at structural decay.
 
 ## Real-World Application: Weather Network
 
