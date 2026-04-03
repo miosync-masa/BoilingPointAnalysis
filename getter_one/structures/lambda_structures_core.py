@@ -218,7 +218,6 @@ class LambdaStructuresCore:
     ) -> tuple:
         """Q_Λ - トポロジカルチャージ計算（N次元汎用）"""
         n_steps = len(lambda_F_mag)
-        Q_lambda = xp.zeros(n_steps)
 
         # CuPyの場合はnumpy配列に一旦戻してループ
         # （ここはカーネル化候補だが、n_stepsが小さいので影響小）
