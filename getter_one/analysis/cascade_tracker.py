@@ -1,28 +1,6 @@
 """
 Cascade Tracker - Domain-Agnostic Cascade Chain Reconstruction
 ================================================================
-
-BANKAI-MD Third Impact Analytics の汎用版。
-閉じた系（タンパク質残基）→ 開いた系（N次元時系列）への拡張。
-
-Third Impact では残基の壁が系の境界だった。
-GETTER One では因果が途切れるところが動的な系の境界になる。
-
-Core Concept:
-    複数の ΔΛC イベントを時系列で検出し、
-    イベント間の因果チェーン（A→B→C→...）を再構成する。
-
-    event_i.affected_dims ∩ event_j.genesis_dims ≠ ∅
-    かつ event_j が event_i の直後に発生
-    → event_i が event_j を引き起こした（因果リンク）
-
-MD版との対応:
-    genesis_atom     → genesis_dims（最初に動いた次元）
-    first_wave_atom  → wave_dims（伝播先の次元）
-    residue_bridge   → cross_group_bridge（次元グループ間の橋渡し）
-    residue          → dimension_group（オプション）
-    drug_target      → critical_dims（介入対象の次元）
-
 Built with 💕 by Masamichi & Tamaki
 """
 
