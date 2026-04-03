@@ -1,6 +1,13 @@
 """
 Cascade Tracker - Domain-Agnostic Cascade Chain Reconstruction
 ================================================================
+
+BANKAI-MD Third Impact Analytics の汎用版。
+閉じた系（タンパク質残基）→ 開いた系（N次元時系列）への拡張。
+
+Third Impact では残基の壁が系の境界だった。
+GETTER One では因果が途切れるところが動的な系の境界になる。
+
 Core Concept:
     複数の ΔΛC イベントを時系列で検出し、
     イベント間の因果チェーン（A→B→C→...）を再構成する。
@@ -163,15 +170,24 @@ class CascadeTracker:
     Parameters
     ----------
     sigma_threshold : float
-        genesis 検出の z-score 閾値
+        genesis 検出の z-score 閾値（adaptive=True の場合はヒント値）
     max_gap : int
-        因果リンク判定の最大フレーム間隔
+        因果リンク判定の最大フレーム間隔（adaptive=True の場合はデータから調整）
     min_shared_dims : int
         因果リンク判定に必要な最小共有次元数
     min_delta_lambda_c : float
-        ΔΛC イベント検出の最小閾値（相対値）
+        ΔΛC イベント検出の最小閾値（adaptive=True の場合はデータから調整）
     lookback : int
-        イベント発火次元推定のルックバック幅
+        イベント発火次元推定のルックバック幅（adaptive=True の場合はデータから調整）
+    adaptive : bool
+        適応的パラメータ調整を有効にするか。
+        True の場合、上記パラメータはデフォルトヒントとして扱われ、
+        データのボラティリティ・相関構造・スペクトル特性から動的に調整される。
+    max_chains : int
+        出力するカスケードチェーンの最大数（上位N件）。
+        DAGのパス列挙で組み合わせ爆発を防ぐ。
+    min_causality : float
+        チェーンの平均因果スコアの最小値。これ未満のチェーンは除外される。
     """
 
     def __init__(
@@ -181,18 +197,203 @@ class CascadeTracker:
         min_shared_dims: int = 1,
         min_delta_lambda_c: float = 2.0,
         lookback: int = 12,
+        adaptive: bool = True,
+        max_chains: int = 30,
+        min_causality: float = 0.1,
     ):
+        # ユーザー指定値（adaptive=True ならヒント値）
+        self.sigma_threshold_hint = sigma_threshold
+        self.max_gap_hint = max_gap
+        self.min_shared_dims = min_shared_dims
+        self.min_delta_lambda_c_hint = min_delta_lambda_c
+        self.lookback_hint = lookback
+        self.adaptive = adaptive
+        self.max_chains = max_chains
+        self.min_causality = min_causality
+
+        # 実行時に更新されるパラメータ
         self.sigma_threshold = sigma_threshold
         self.max_gap = max_gap
-        self.min_shared_dims = min_shared_dims
         self.min_delta_lambda_c = min_delta_lambda_c
         self.lookback = lookback
+
+        # 適応的パラメータの計算結果を保持
+        self.adaptive_params: dict | None = None
 
         logger.info(
             f"✅ CascadeTracker initialized "
             f"(σ={sigma_threshold}, max_gap={max_gap}, "
-            f"min_shared={min_shared_dims})"
+            f"min_shared={min_shared_dims}, adaptive={adaptive})"
         )
+
+    # ================================================================
+    # Adaptive Parameter Computation
+    # ================================================================
+
+    def _compute_adaptive_parameters(
+        self,
+        state_vectors: np.ndarray,
+    ) -> dict:
+        """
+        データ駆動の適応的パラメータ計算
+
+        BANKAI-MD の compute_adaptive_window_size を汎用化。
+        データのボラティリティ・相関構造・スペクトル特性から
+        閾値・ウィンドウサイズ・検出感度を動的に算出する。
+
+        Returns
+        -------
+        dict
+            adaptive_window: int     - ΔΛC検出のローカルウィンドウ
+            lookback: int            - genesis検出のルックバック
+            sigma_threshold: float   - genesis z-score 閾値
+            delta_lc_sigma: float    - ΔΛCイベント検出の σ 倍率
+            max_gap: int             - 因果リンクの最大フレーム間隔
+            volatility_metrics: dict - 診断用メトリクス
+        """
+        n_frames, n_dims = state_vectors.shape
+
+        # ── 1. グローバルボラティリティ ──
+        global_std = np.std(state_vectors)
+        global_mean = np.mean(np.abs(state_vectors))
+        volatility_ratio = global_std / (global_mean + 1e-10)
+
+        # ── 2. 時間的変動性（隣接フレーム間の変化率）──
+        temporal_changes = np.diff(state_vectors, axis=0)
+        temporal_volatility = np.mean(np.std(temporal_changes, axis=0))
+
+        # ── 3. 次元間の相関構造の複雑度 ──
+        if n_dims > 1:
+            corr_matrix = np.corrcoef(state_vectors.T)
+            triu = corr_matrix[np.triu_indices(n_dims, k=1)]
+            # NaN除去
+            triu = triu[~np.isnan(triu)]
+            correlation_complexity = 1.0 - np.mean(np.abs(triu)) if len(triu) > 0 else 0.5
+        else:
+            correlation_complexity = 0.5
+
+        # ── 4. 局所的変動パターン ──
+        base_window = max(10, n_frames // 10)
+        local_volatilities = []
+        for i in range(0, n_frames - base_window, max(1, base_window // 2)):
+            window_data = state_vectors[i:i + base_window]
+            local_volatilities.append(np.std(window_data))
+
+        if len(local_volatilities) > 1:
+            volatility_variation = (
+                np.std(local_volatilities)
+                / (np.mean(local_volatilities) + 1e-10)
+            )
+        else:
+            volatility_variation = 0.5
+
+        # ── 5. スペクトル解析（支配的周期の推定）──
+        fft_mag = np.abs(np.fft.fft(state_vectors, axis=0))
+        low_cutoff = max(1, n_frames // 10)
+        high_cutoff = max(2, n_frames // 2)
+        low_freq_ratio = (
+            np.sum(fft_mag[:low_cutoff])
+            / (np.sum(fft_mag[:high_cutoff]) + 1e-10)
+        )
+
+        # ── scale_factor の計算 ──
+        scale_factor = 1.0
+
+        # ボラティリティが高い → 小さいウィンドウ・低い閾値
+        if volatility_ratio > 2.0:
+            scale_factor *= 0.8
+        elif volatility_ratio < 0.3:
+            scale_factor *= 1.5
+
+        # 時間的変動が大きい → 小さいウィンドウ
+        if temporal_volatility > global_std * 2.0:
+            scale_factor *= 0.9
+        elif temporal_volatility < global_std * 0.3:
+            scale_factor *= 1.4
+
+        # 相関構造が複雑 → 大きいウィンドウ
+        if correlation_complexity > 0.7:
+            scale_factor *= 1.2
+        elif correlation_complexity < 0.3:
+            scale_factor *= 0.9
+
+        # 局所変動が大きい → やや小さめ
+        if volatility_variation > 1.0:
+            scale_factor *= 0.85
+
+        # 低周波支配 → 大きいウィンドウ
+        if low_freq_ratio > 0.8:
+            scale_factor *= 1.4
+        elif low_freq_ratio < 0.3:
+            scale_factor *= 0.8
+
+        # ── パラメータの算出 ──
+
+        # adaptive_window: ΔΛCローカル閾値のウィンドウ
+        raw_window = int(base_window * scale_factor)
+        adaptive_window = np.clip(raw_window, 10, max(20, n_frames // 3))
+
+        # lookback: genesis検出のルックバック
+        raw_lookback = int(self.lookback_hint * scale_factor)
+        lookback = np.clip(raw_lookback, 3, max(5, n_frames // 10))
+
+        # sigma_threshold: genesis z-score 閾値
+        # ボラティリティが高い → 閾値を上げる（ノイズが多い）
+        # ボラティリティが低い → 閾値を下げる（小さな異変も拾う）
+        if volatility_ratio > 2.0:
+            sigma_threshold = self.sigma_threshold_hint + 0.5
+        elif volatility_ratio < 0.5:
+            sigma_threshold = max(1.0, self.sigma_threshold_hint - 0.5)
+        else:
+            sigma_threshold = self.sigma_threshold_hint
+
+        # delta_lc_sigma: ΔΛCイベント検出の σ 倍率
+        # ボラティリティが高い → より厳しく
+        if volatility_ratio > 1.5:
+            delta_lc_sigma = self.min_delta_lambda_c_hint + 0.3
+        elif volatility_ratio < 0.5:
+            delta_lc_sigma = max(1.0, self.min_delta_lambda_c_hint - 0.3)
+        else:
+            delta_lc_sigma = self.min_delta_lambda_c_hint
+
+        # max_gap: 因果リンクの最大フレーム間隔
+        # データ長に応じてスケール
+        raw_gap = int(self.max_gap_hint * scale_factor)
+        max_gap = np.clip(raw_gap, 3, max(5, n_frames // 5))
+
+        params = {
+            "adaptive_window": int(adaptive_window),
+            "lookback": int(lookback),
+            "sigma_threshold": float(sigma_threshold),
+            "delta_lc_sigma": float(delta_lc_sigma),
+            "max_gap": int(max_gap),
+            "scale_factor": float(scale_factor),
+            "volatility_metrics": {
+                "global_volatility": float(volatility_ratio),
+                "temporal_volatility": float(temporal_volatility),
+                "correlation_complexity": float(correlation_complexity),
+                "local_variation": float(volatility_variation),
+                "low_freq_ratio": float(low_freq_ratio),
+            },
+        }
+
+        logger.info(
+            f"   Adaptive params: scale={scale_factor:.2f}, "
+            f"window={params['adaptive_window']}, "
+            f"lookback={params['lookback']}, "
+            f"σ_genesis={params['sigma_threshold']:.1f}, "
+            f"σ_ΔΛC={params['delta_lc_sigma']:.1f}, "
+            f"max_gap={params['max_gap']}"
+        )
+        logger.info(
+            f"   Volatility: global={volatility_ratio:.3f}, "
+            f"temporal={temporal_volatility:.3f}, "
+            f"corr_complexity={correlation_complexity:.3f}, "
+            f"local_var={volatility_variation:.3f}, "
+            f"low_freq={low_freq_ratio:.3f}"
+        )
+
+        return params
 
     # ================================================================
     # Main Entry Point
@@ -232,6 +433,24 @@ class CascadeTracker:
         logger.info(
             f"🔺 CascadeTracker: {n_dims} dims × {n_frames} frames"
         )
+
+        # ── Step 0: 適応的パラメータ計算 ──
+        if self.adaptive:
+            self.adaptive_params = self._compute_adaptive_parameters(
+                state_vectors
+            )
+            # 実行時パラメータを更新
+            self.sigma_threshold = self.adaptive_params["sigma_threshold"]
+            self.max_gap = self.adaptive_params["max_gap"]
+            self.min_delta_lambda_c = self.adaptive_params["delta_lc_sigma"]
+            self.lookback = self.adaptive_params["lookback"]
+        else:
+            # ヒント値をそのまま使用
+            self.sigma_threshold = self.sigma_threshold_hint
+            self.max_gap = self.max_gap_hint
+            self.min_delta_lambda_c = self.min_delta_lambda_c_hint
+            self.lookback = self.lookback_hint
+            self.adaptive_params = None
 
         # ── Step 1: ΔΛC イベント検出 ──
         events = self._detect_events(
@@ -295,10 +514,13 @@ class CascadeTracker:
         dimension_names: list[str],
     ) -> list[CascadeEvent]:
         """
-        ΔΛCイベントの検出
+        ΔΛCイベントの検出（適応的ウィンドウ版）
 
-        rho_T × sigma_s × |lambda_F| が閾値を超えるフレームを検出し、
-        各イベントの genesis/affected dims を特定する。
+        rho_T × sigma_s × |lambda_F| が **ローカル閾値** を超えるフレームを検出。
+
+        グローバル閾値だと巨大イベント（リーマンショック本体等）が
+        統計を支配し、前兆的な小さな異変が埋もれる。
+        適応的ウィンドウにより「その時期における異常」を検出する。
         """
         events = []
 
@@ -308,17 +530,53 @@ class CascadeTracker:
         if delta_lambda_c is None or len(delta_lambda_c) == 0:
             return events
 
-        # 閾値: mean + sigma_threshold × std
-        mean_dlc = np.mean(delta_lambda_c)
-        std_dlc = np.std(delta_lambda_c)
-        threshold = mean_dlc + self.min_delta_lambda_c * std_dlc
+        n = len(delta_lambda_c)
 
-        # イベントフレームの検出（ピーク検出）
-        event_frames = self._detect_peaks(delta_lambda_c, threshold)
+        # 適応的ウィンドウサイズ
+        if self.adaptive_params is not None:
+            adaptive_window = self.adaptive_params["adaptive_window"]
+        else:
+            adaptive_window = max(20, self.lookback * 4)
+
+        # ── ローカル閾値の計算 ──
+        local_threshold = np.zeros(n)
+        for i in range(n):
+            # ウィンドウ範囲（前方のみ参照 = 未来の情報を使わない）
+            w_start = max(0, i - adaptive_window)
+            w_end = i + 1  # 現在フレームまで
+
+            local_slice = delta_lambda_c[w_start:w_end]
+            local_mean = np.mean(local_slice)
+            local_std = np.std(local_slice)
+
+            local_threshold[i] = local_mean + self.min_delta_lambda_c * local_std
+
+        # グローバル閾値も参考に記録
+        global_mean = np.mean(delta_lambda_c)
+        global_std = np.std(delta_lambda_c)
+        global_threshold = global_mean + self.min_delta_lambda_c * global_std
+
+        # ── ローカル閾値超過のピーク検出 ──
+        # 各フレームでローカル閾値を超えているかチェック
+        above_local = delta_lambda_c > local_threshold
+        above_indices = np.where(above_local)[0]
+
+        # ピーク検出（局所最大のみ、最小距離フィルタ付き）
+        event_frames = self._detect_peaks_adaptive(
+            delta_lambda_c, above_indices, min_distance=3,
+        )
 
         logger.info(
-            f"   ΔΛC threshold: {threshold:.4f} "
-            f"(μ={mean_dlc:.4f}, σ={std_dlc:.4f})"
+            f"   ΔΛC adaptive window: {adaptive_window} frames"
+        )
+        logger.info(
+            f"   ΔΛC global ref: threshold={global_threshold:.4f} "
+            f"(μ={global_mean:.4f}, σ={global_std:.4f})"
+        )
+        logger.info(
+            f"   Adaptive detection: {len(event_frames)} events "
+            f"(vs {len(self._detect_peaks(delta_lambda_c, global_threshold))} "
+            f"with global threshold)"
         )
 
         for event_id, frame in enumerate(event_frames):
@@ -406,6 +664,48 @@ class CascadeTracker:
                 filtered.append(peak)
             elif signal[peak] > signal[filtered[-1]]:
                 # より強いピークで置換
+                filtered[-1] = peak
+
+        return filtered
+
+    def _detect_peaks_adaptive(
+        self,
+        signal: np.ndarray,
+        above_indices: np.ndarray,
+        min_distance: int = 3,
+    ) -> list[int]:
+        """
+        適応的閾値でのピーク検出
+
+        Parameters
+        ----------
+        signal : np.ndarray
+            1D信号
+        above_indices : np.ndarray
+            ローカル閾値を超過したフレームのインデックス
+        min_distance : int
+            ピーク間の最小距離
+        """
+        if len(above_indices) == 0:
+            return []
+
+        # 局所最大のみ抽出
+        peaks = []
+        for idx in above_indices:
+            if idx == 0 or idx >= len(signal) - 1:
+                continue
+            if signal[idx] >= signal[idx - 1] and signal[idx] >= signal[idx + 1]:
+                peaks.append(idx)
+
+        if len(peaks) <= 1:
+            return peaks
+
+        # 最小距離フィルタ
+        filtered = [peaks[0]]
+        for peak in peaks[1:]:
+            if peak - filtered[-1] >= min_distance:
+                filtered.append(peak)
+            elif signal[peak] > signal[filtered[-1]]:
                 filtered[-1] = peak
 
         return filtered
@@ -797,6 +1097,12 @@ class CascadeTracker:
             key=lambda c: c.length * c.mean_causality,
             reverse=True,
         )
+
+        # min_causality フィルタ
+        chains = [c for c in chains if c.mean_causality >= self.min_causality]
+
+        # max_chains で上位のみ保持
+        chains = chains[:self.max_chains]
 
         return chains
 
