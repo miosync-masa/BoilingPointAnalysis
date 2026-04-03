@@ -225,50 +225,49 @@ void compute_distance_matrix_kernel(
 }
 """
 
-# トポロジカルチャージ計算カーネル（double精度内部演算版）
+# トポロジカルチャージ計算カーネル（double精度版）
 TOPOLOGICAL_CHARGE_KERNEL = r"""
 extern "C" __global__
 void compute_topological_charge_kernel(
-    const float* __restrict__ lambda_F,        // (n_steps, 3)
-    const float* __restrict__ lambda_F_mag,    // (n_steps,)
-    float* __restrict__ Q_lambda,             // (n_steps,)
+    const double* __restrict__ lambda_F,       // (n_steps, 3) double精度
+    const double* __restrict__ lambda_F_mag,   // (n_steps,) double精度
+    double* __restrict__ Q_lambda,             // (n_steps,) double精度
     const int n_steps
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (idx >= n_steps - 1 || idx == 0) {
-        if (idx < n_steps) Q_lambda[idx] = 0.0f;
+        if (idx < n_steps) Q_lambda[idx] = 0.0;
         return;
     }
     
-    const float mag_curr = lambda_F_mag[idx];
-    const float mag_prev = lambda_F_mag[idx - 1];
+    const double mag_curr = lambda_F_mag[idx];
+    const double mag_prev = lambda_F_mag[idx - 1];
     
-    if (mag_curr > 1e-10f && mag_prev > 1e-10f) {
-        // double精度で内部演算（cross_z ≈ 0 での符号反転を防止）
-        const double inv_mag_prev = 1.0 / (double)mag_prev;
-        const double inv_mag_curr = 1.0 / (double)mag_curr;
+    if (mag_curr > 1e-10 && mag_prev > 1e-10) {
+        const double inv_mag_prev = 1.0 / mag_prev;
+        const double inv_mag_curr = 1.0 / mag_curr;
         
-        const double v1_x = (double)lambda_F[(idx - 1) * 3 + 0] * inv_mag_prev;
-        const double v1_y = (double)lambda_F[(idx - 1) * 3 + 1] * inv_mag_prev;
-        const double v1_z = (double)lambda_F[(idx - 1) * 3 + 2] * inv_mag_prev;
+        const double v1_x = lambda_F[(idx - 1) * 3 + 0] * inv_mag_prev;
+        const double v1_y = lambda_F[(idx - 1) * 3 + 1] * inv_mag_prev;
+        const double v1_z = lambda_F[(idx - 1) * 3 + 2] * inv_mag_prev;
         
-        const double v2_x = (double)lambda_F[idx * 3 + 0] * inv_mag_curr;
-        const double v2_y = (double)lambda_F[idx * 3 + 1] * inv_mag_curr;
-        const double v2_z = (double)lambda_F[idx * 3 + 2] * inv_mag_curr;
+        const double v2_x = lambda_F[idx * 3 + 0] * inv_mag_curr;
+        const double v2_y = lambda_F[idx * 3 + 1] * inv_mag_curr;
+        const double v2_z = lambda_F[idx * 3 + 2] * inv_mag_curr;
         
-        // 内積（double精度）
+        // 内積
         const double cos_angle = v1_x * v2_x + v1_y * v2_y + v1_z * v2_z;
         const double clamped_cos = fmax(-1.0, fmin(1.0, cos_angle));
         const double angle = acos(clamped_cos);
         
-        // 2D回転方向（double精度で符号判定）
+        // 2D回転方向
         const double cross_z = v1_x * v2_y - v1_y * v2_x;
         const double signed_angle = (cross_z >= 0.0) ? angle : -angle;
         
-        Q_lambda[idx] = (float)(signed_angle / (2.0 * 3.14159265358979323846));
+        Q_lambda[idx] = signed_angle / (2.0 * 3.14159265358979323846);
     } else {
-        Q_lambda[idx] = 0.0f;
+        Q_lambda[idx] = 0.0;
     }
 }
 """
@@ -621,19 +620,23 @@ def topological_charge_kernel(
 ) -> NDArray:
     """
     トポロジカルチャージ計算カーネルのラッパー
-    ここは元々ちゃんとやってたよ！えらい環ちゃん！✨
+    double精度版 — cross_z ≈ 0 での符号安定性を確保
     """
     if not HAS_GPU:
         raise RuntimeError("GPU not available")
 
-    # ⚡ 入力をGPU配列に変換！（これは元々あった！）
+    # ⚡ double精度でGPU転送（float32だとcross_zの符号が不安定）
     if not isinstance(lambda_F, cp.ndarray):
-        lambda_F = cp.asarray(lambda_F, dtype=cp.float32)
+        lambda_F = cp.asarray(lambda_F, dtype=cp.float64)
+    else:
+        lambda_F = lambda_F.astype(cp.float64)
     if not isinstance(lambda_F_mag, cp.ndarray):
-        lambda_F_mag = cp.asarray(lambda_F_mag, dtype=cp.float32)
+        lambda_F_mag = cp.asarray(lambda_F_mag, dtype=cp.float64)
+    else:
+        lambda_F_mag = lambda_F_mag.astype(cp.float64)
 
     n_steps = len(lambda_F_mag)
-    Q_lambda = cp.zeros(n_steps, dtype=cp.float32)
+    Q_lambda = cp.zeros(n_steps, dtype=cp.float64)
 
     kernel_manager = CUDAKernels()
     kernel = kernel_manager.get_kernel("topological_charge")
