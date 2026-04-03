@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_KERNELS = False
 
-logger = logging.getLogger("getter_one.structures.lambda_structures_core")
+logger = logging.getLogger("bankai.structures.lambda_structures_core")
 
 
 @dataclass
@@ -144,6 +144,8 @@ class LambdaStructuresCore:
         xp = self.xp
 
         # 3D + CUDA kernels 利用可能？
+        # rho_T: Bessel補正済みカーネル（1/(N-1)）
+        # Q_lambda: double精度内部演算カーネル（cross_z符号安定化済み）
         can_use_kernels = self.use_kernels and n_dims == 3
 
         # 1. ΛF - 構造フロー
@@ -339,7 +341,7 @@ class LambdaStructuresCore:
     def _compute_rho_T_kernel(
         self, positions: np.ndarray, window_steps: int,
     ) -> np.ndarray:
-        """ρT - CUDAカーネル版（3D専用、MD互換）"""
+        """ρT - CUDAカーネル版（3D専用、Bessel補正済み）"""
         logger.debug("   ρT: CUDA kernel path (3D)")
         rho_gpu = tension_field_kernel(positions, window_steps)
         return cp.asnumpy(rho_gpu)
@@ -347,8 +349,8 @@ class LambdaStructuresCore:
     def _compute_Q_lambda_kernel(
         self, lambda_F, lambda_F_mag,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Q_Λ - CUDAカーネル版（3D専用）"""
-        logger.debug("   Q_Λ: CUDA kernel path (3D)")
+        """Q_Λ - CUDAカーネル版（3D専用、double精度内部演算）"""
+        logger.debug("   Q_Λ: CUDA kernel path (3D, double-precision)")
 
         # GPU上にあることを保証
         if not isinstance(lambda_F, cp.ndarray):
