@@ -24,14 +24,13 @@ except ImportError:
 try:
     from ..core.gpu_kernels import (
         tension_field_kernel,
-        topological_charge_kernel,
     )
 
     HAS_KERNELS = True
 except ImportError:
     HAS_KERNELS = False
 
-logger = logging.getLogger("getter_one.structures.lambda_structures_core")
+logger = logging.getLogger("bankai.structures.lambda_structures_core")
 
 
 @dataclass
@@ -129,9 +128,10 @@ class LambdaStructuresCore:
         xp = self.xp
 
         # 3D + CUDA kernels 利用可能？
-        # rho_T: Bessel補正済みカーネル（1/(N-1)）
-        # Q_lambda: double精度内部演算カーネル（cross_z符号安定化済み）
-        can_use_kernels = self.use_kernels and n_dims == 3
+        # rho_T: Bessel補正済みカーネル → ✅ 使用（diff=6e-8）
+        # Q_lambda: float32 I/O で cross_z≈0 の符号が不安定
+        #   → カーネルの入力を double* に変更するまでは CPU パス
+        can_use_kernels_rho = self.use_kernels and n_dims == 3
 
         # 1. ΛF - 構造フロー
         lambda_F, lambda_F_mag = self._compute_lambda_F(sv_gpu, xp)
@@ -140,22 +140,18 @@ class LambdaStructuresCore:
         lambda_FF, lambda_FF_mag = self._compute_lambda_FF(lambda_F, xp)
 
         # 3. ρT - テンション場
-        if can_use_kernels:
+        if can_use_kernels_rho:
             rho_T = self._compute_rho_T_kernel(state_vectors, window_steps)
         elif self.use_gpu:
             rho_T = self._compute_rho_T_gpu(sv_gpu, window_steps)
         else:
             rho_T = self._compute_rho_T_cpu(state_vectors, window_steps)
 
-        # 4. Q_Λ - トポロジカルチャージ
-        if can_use_kernels:
-            Q_lambda, Q_cumulative = self._compute_Q_lambda_kernel(
-                lambda_F, lambda_F_mag
-            )
-        else:
-            Q_lambda, Q_cumulative = self._compute_Q_lambda(
-                lambda_F, lambda_F_mag, xp
-            )
+        # 4. Q_Λ - トポロジカルチャージ（CPU/CuPyパス）
+        # float32 I/O カーネルでは cross_z≈0 で符号不安定のため
+        Q_lambda, Q_cumulative = self._compute_Q_lambda(
+            lambda_F, lambda_F_mag, xp
+        )
 
         # 5. σₛ - 構造同期率
         sigma_s = self._compute_sigma_s(sv_gpu, lambda_F, window_steps, xp)
@@ -330,29 +326,6 @@ class LambdaStructuresCore:
         logger.debug("   ρT: CUDA kernel path (3D)")
         rho_gpu = tension_field_kernel(positions, window_steps)
         return cp.asnumpy(rho_gpu)
-
-    def _compute_Q_lambda_kernel(
-        self, lambda_F, lambda_F_mag,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Q_Λ - CUDAカーネル版（3D専用、double精度内部演算）"""
-        logger.debug("   Q_Λ: CUDA kernel path (3D, double-precision)")
-
-        # GPU上にあることを保証
-        if not isinstance(lambda_F, cp.ndarray):
-            lf_gpu = cp.asarray(lambda_F, dtype=cp.float32)
-        else:
-            lf_gpu = lambda_F.astype(cp.float32)
-
-        if not isinstance(lambda_F_mag, cp.ndarray):
-            lfm_gpu = cp.asarray(lambda_F_mag, dtype=cp.float32)
-        else:
-            lfm_gpu = lambda_F_mag.astype(cp.float32)
-
-        Q_gpu = topological_charge_kernel(lf_gpu, lfm_gpu)
-        Q_np = cp.asnumpy(Q_gpu)
-        Q_cumulative = np.cumsum(Q_np)
-
-        return Q_np, Q_cumulative
 
     # ================================================================
     # CuPy GPU パス（N次元汎用）
