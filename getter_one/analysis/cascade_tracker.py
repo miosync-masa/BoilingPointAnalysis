@@ -1,13 +1,6 @@
 """
 Cascade Tracker - Domain-Agnostic Cascade Chain Reconstruction
 ================================================================
-
-BANKAI-MD Third Impact Analytics の汎用版。
-閉じた系（タンパク質残基）→ 開いた系（N次元時系列）への拡張。
-
-Third Impact では残基の壁が系の境界だった。
-GETTER One では因果が途切れるところが動的な系の境界になる。
-
 Core Concept:
     複数の ΔΛC イベントを時系列で検出し、
     イベント間の因果チェーン（A→B→C→...）を再構成する。
