@@ -124,7 +124,9 @@ void compute_tension_field_kernel(
         cov_zz += dz * dz;
     }
     
-    rho_T[idx] = (cov_xx + cov_yy + cov_zz) * inv_size;
+    rho_T[idx] = (local_size > 1)
+        ? (cov_xx + cov_yy + cov_zz) / (float)(local_size - 1)
+        : 0.0f;
 }
 """
 
@@ -223,7 +225,7 @@ void compute_distance_matrix_kernel(
 }
 """
 
-# トポロジカルチャージ計算カーネル
+# トポロジカルチャージ計算カーネル（double精度内部演算版）
 TOPOLOGICAL_CHARGE_KERNEL = r"""
 extern "C" __global__
 void compute_topological_charge_kernel(
@@ -243,28 +245,28 @@ void compute_topological_charge_kernel(
     const float mag_prev = lambda_F_mag[idx - 1];
     
     if (mag_curr > 1e-10f && mag_prev > 1e-10f) {
-        // 正規化ベクトル
-        const float inv_mag_prev = 1.0f / mag_prev;
-        const float inv_mag_curr = 1.0f / mag_curr;
+        // double精度で内部演算（cross_z ≈ 0 での符号反転を防止）
+        const double inv_mag_prev = 1.0 / (double)mag_prev;
+        const double inv_mag_curr = 1.0 / (double)mag_curr;
         
-        const float v1_x = lambda_F[(idx - 1) * 3 + 0] * inv_mag_prev;
-        const float v1_y = lambda_F[(idx - 1) * 3 + 1] * inv_mag_prev;
-        const float v1_z = lambda_F[(idx - 1) * 3 + 2] * inv_mag_prev;
+        const double v1_x = (double)lambda_F[(idx - 1) * 3 + 0] * inv_mag_prev;
+        const double v1_y = (double)lambda_F[(idx - 1) * 3 + 1] * inv_mag_prev;
+        const double v1_z = (double)lambda_F[(idx - 1) * 3 + 2] * inv_mag_prev;
         
-        const float v2_x = lambda_F[idx * 3 + 0] * inv_mag_curr;
-        const float v2_y = lambda_F[idx * 3 + 1] * inv_mag_curr;
-        const float v2_z = lambda_F[idx * 3 + 2] * inv_mag_curr;
+        const double v2_x = (double)lambda_F[idx * 3 + 0] * inv_mag_curr;
+        const double v2_y = (double)lambda_F[idx * 3 + 1] * inv_mag_curr;
+        const double v2_z = (double)lambda_F[idx * 3 + 2] * inv_mag_curr;
         
-        // 内積
-        const float cos_angle = v1_x * v2_x + v1_y * v2_y + v1_z * v2_z;
-        const float clamped_cos = fmaxf(-1.0f, fminf(1.0f, cos_angle));
-        const float angle = acosf(clamped_cos);
+        // 内積（double精度）
+        const double cos_angle = v1_x * v2_x + v1_y * v2_y + v1_z * v2_z;
+        const double clamped_cos = fmax(-1.0, fmin(1.0, cos_angle));
+        const double angle = acos(clamped_cos);
         
-        // 2D回転方向（z成分の外積）
-        const float cross_z = v1_x * v2_y - v1_y * v2_x;
-        const float signed_angle = (cross_z >= 0) ? angle : -angle;
+        // 2D回転方向（double精度で符号判定）
+        const double cross_z = v1_x * v2_y - v1_y * v2_x;
+        const double signed_angle = (cross_z >= 0.0) ? angle : -angle;
         
-        Q_lambda[idx] = signed_angle / (2.0f * 3.14159265359f);
+        Q_lambda[idx] = (float)(signed_angle / (2.0 * 3.14159265358979323846));
     } else {
         Q_lambda[idx] = 0.0f;
     }
