@@ -1,21 +1,6 @@
 """
 Lambda³ Structure Computation - Core (Domain-Agnostic)
 =====================================================
-
-BANKAI-MDのlambda_structures_gpu.pyの汎用版。
-GPU依存・MD依存を完全に排除し、任意のN次元時系列データに対して
-Lambda³構造を計算する。
-
-GPU Acceleration Strategy:
-  - n_dims == 3: 既存CUDAカーネル（gpu_kernels.py）を直接使用（MD互換パス）
-  - n_dims != 3: CuPy配列操作でGPU高速化（汎用パス）
-  - GPU無し: numpy フォールバック（CPU）
-
-Compatibility:
-  - 出力 dict のキーは lambda_structures_gpu.py と同一
-  - BoundaryDetectorGPU, TopologyBreaksDetectorGPU,
-    AnomalyDetectorGPU にそのまま接続可能
-
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -46,7 +31,7 @@ try:
 except ImportError:
     HAS_KERNELS = False
 
-logger = logging.getLogger("bankai.structures.lambda_structures_core")
+logger = logging.getLogger("getter_one.structures.lambda_structures_core")
 
 
 @dataclass
