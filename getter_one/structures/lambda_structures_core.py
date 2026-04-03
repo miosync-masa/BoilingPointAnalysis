@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_KERNELS = False
 
-logger = logging.getLogger("bankai.structures.lambda_structures_core")
+logger = logging.getLogger("getter_one.structures.lambda_structures_core")
 
 
 @dataclass
