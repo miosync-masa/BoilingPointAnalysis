@@ -11,13 +11,12 @@ pip install getter-one[gpu] で使ってね！
 
 by 環ちゃん
 """
+
 from __future__ import annotations
 
 import logging
 
 import numpy as np
-
-from ..models import NDArray
 
 # ===============================
 # GPU ONLY — No Fallback
@@ -25,7 +24,6 @@ from ..models import NDArray
 
 try:
     import cupy as cp
-    from cupy import cuda
 
     HAS_GPU = True
 except ImportError as _err:
@@ -218,6 +216,7 @@ void hybrid_score_kernel(
 # Kernel Manager
 # ===============================
 
+
 class InverseKernels:
     """逆問題CUDA カーネル管理クラス"""
 
@@ -267,6 +266,7 @@ class InverseKernels:
 # Wrapper Functions
 # ===============================
 
+
 def compute_gram_matrix(events: np.ndarray) -> cp.ndarray:
     """
     観測データのGram行列を計算（GPU上）
@@ -309,7 +309,6 @@ def compute_path_statistics(
         (path_means, path_stds) 各 (n_paths,)
     """
     lm = np.asarray(lambda_matrix, dtype=np.float32)
-    n_paths = lm.shape[0]
 
     deltas = np.abs(np.diff(lm, axis=1))
     means = np.mean(deltas, axis=1).astype(np.float32)
@@ -366,9 +365,7 @@ def inverse_verify_all(
     ev = np.asarray(events, dtype=np.float32)
     n_paths, n_events = lm.shape
 
-    logger.info(
-        f"🔺 Inverse verification: {n_events} events × {n_paths} paths (GPU)"
-    )
+    logger.info(f"🔺 Inverse verification: {n_events} events × {n_paths} paths (GPU)")
 
     # カーネル取得
     kernels = InverseKernels()
@@ -459,8 +456,7 @@ def inverse_verify_all(
     n_structural = int(np.sum(results["verdicts"] > 0.5))
     n_noise = n_events - n_structural
     logger.info(
-        f"✅ Verification complete: "
-        f"{n_structural} structural / {n_noise} noise"
+        f"✅ Verification complete: {n_structural} structural / {n_noise} noise"
     )
 
     return results
