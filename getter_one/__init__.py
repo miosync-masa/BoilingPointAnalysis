@@ -13,13 +13,13 @@ and causal network extraction for N-dimensional time series.
 Usage:
     from getter_one.data import load
     from getter_one.structures import LambdaStructuresCore
-    from getter_one.analysis import NetworkAnalyzerCore, assess_confidence
+    from getter_one.analysis import CascadeTracker, NetworkAnalyzerCore, assess_confidence
 
 CLI:
     $ getter-one-loader load data.csv --target y -o prepared.csv
     $ getter-one-loader merge a.csv b.json --time date -o merged.csv
 
-Author: Masamichi Iizumi (Miosync, Inc.)
+Author: Masamichi Iizumi & Tamaki (Miosync, Inc.)
 License: MIT
 """
 
@@ -33,8 +33,8 @@ from typing import Any
 # Version
 # ===============================
 
-__version__ = "0.1.7"
-__author__ = "Masamichi Iizumi"
+__version__ = "0.1.8"
+__author__ = "Masamichi Iizumi & Tamaki"
 
 # ===============================
 # Logging
@@ -163,6 +163,23 @@ def get_gpu_info() -> dict[str, Any]:
     return _gpu_env.as_dict()
 
 
+def check_gpu_features() -> dict[str, Any]:
+    """GPU機能の利用可能状況をチェック"""
+    status = {
+        "cupy_installed": HAS_CUPY,
+        "gpu_available": GPU_AVAILABLE,
+        "gpu_name": GPU_NAME,
+        "inverse_checker": False,
+    }
+    try:
+        from .core.gpu_inverse import InverseKernels  # noqa: F401
+
+        status["inverse_checker"] = True
+    except ImportError:
+        pass
+    return status
+
+
 def set_gpu_device(device_id: int) -> None:
     """使用するGPUデバイスを切り替え"""
     if GPU_AVAILABLE:
@@ -218,6 +235,7 @@ __all__ = [
     "HAS_CUPY",
     # Utility
     "get_gpu_info",
+    "check_gpu_features",
     "set_gpu_device",
     "set_log_level",
 ]
@@ -229,6 +247,10 @@ __all__ = [
 #               CooperativeEventNetwork, assess_confidence, ConfidenceReport,
 #               EventConfidence, BoundaryConfidence, CausalLinkConfidence,
 #               SyncConfidence
+#   Cascade:    CascadeTracker, CascadeResult, CascadeEvent,
+#               CascadeChain, CascadeLink
+#   Inverse:    InverseChecker, VerificationResult, EventVerdict (GPU ONLY)
+#   Pipeline:   run, PipelineConfig, PipelineResult
 
 # ===============================
 # Lazy Imports
@@ -281,5 +303,45 @@ def __getattr__(name: str):
         from getter_one.analysis import confidence_kit as _conf
 
         return getattr(_conf, name)
+
+    # --- Analysis: Cascade Tracker ---
+    _cascade_names = {
+        "CascadeTracker",
+        "CascadeResult",
+        "CascadeEvent",
+        "CascadeChain",
+        "CascadeLink",
+    }
+    if name in _cascade_names:
+        from getter_one.analysis import cascade_tracker as _ct
+
+        return getattr(_ct, name)
+
+    # --- Analysis: Inverse Checker (GPU ONLY) ---
+    _inverse_names = {
+        "InverseChecker",
+        "VerificationResult",
+        "EventVerdict",
+    }
+    if name in _inverse_names:
+        try:
+            from getter_one.analysis import inverse_checker as _inv
+
+            return getattr(_inv, name)
+        except ImportError:
+            raise ImportError(
+                f"{name} requires CUDA. Install CuPy: pip install getter-one[gpu]"
+            ) from None
+
+    # --- Pipeline ---
+    _pipeline_names = {
+        "run",
+        "PipelineConfig",
+        "PipelineResult",
+    }
+    if name in _pipeline_names:
+        from getter_one import pipeline as _pipe
+
+        return getattr(_pipe, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
