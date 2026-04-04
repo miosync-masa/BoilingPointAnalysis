@@ -1,10 +1,6 @@
 """
-Lambda³ GPU Core Components
+Getter_one GPU Core Components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-GPUコンピューティングの基盤となるコアモジュール群だよ〜！💕
-ここには基底クラス、メモリ管理、CUDAカーネルが入ってる！
-
 Components:
     - GPUBackend: GPU/CPU自動切り替えの基底クラス
     - GPUMemoryManager: メモリ管理システム
