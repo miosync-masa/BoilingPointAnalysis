@@ -13,7 +13,7 @@ authors = [
     {name = "Masamichi Iizumi&Tamaki", email = "m.iizumi@miosync.email"},
 ]
 maintainers = [
-    {name = "Masamichi Iizumii&Tamaki", email = "m.iizumi@miosync.email"},
+    {name = "Masamichi Iizumi&Tamaki", email = "m.iizumi@miosync.email"},
 ]
 keywords = [
     "time-series",
