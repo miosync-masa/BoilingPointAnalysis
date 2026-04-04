@@ -1,6 +1,23 @@
 """
 Network Analyzer Core - Domain-Agnostic
 ========================================
+
+BANKAI-MDのthird_impact_analytics.pyの汎用版。
+N次元時系列データの次元間ネットワーク構造を解析する。
+
+MD版との対応:
+  atom          → dimension（次元/チャネル）
+  residue       → （廃止：物理実体データ非依存）
+  sync_network  → 同期ネットワーク（同時相関）
+  causal_network→ 因果ネットワーク（ラグ付き相関）
+  async_network → （廃止：距離概念なし）
+  residue_bridge→ （廃止）
+
+天気データでの解釈例:
+  sync:   「湿度と露点が常に同時に動く」
+  causal: 「気温が動いた3時間後に気圧が動く」
+  pattern: parallel（全次元同時変化）/ cascade（伝播的変化）
+
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -724,7 +741,7 @@ class NetworkAnalyzerCore:
                 if z_dst != a:
                     continue
                 z = z_src
-                if z == a or z == b:
+                if z in (a, b):
                     continue
 
                 # Z→B も存在するか？
