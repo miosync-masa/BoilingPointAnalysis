@@ -1,23 +1,6 @@
 """
 Network Analyzer Core - Domain-Agnostic
 ========================================
-
-BANKAI-MDのthird_impact_analytics.pyの汎用版。
-N次元時系列データの次元間ネットワーク構造を解析する。
-
-MD版との対応:
-  atom          → dimension（次元/チャネル）
-  residue       → （廃止：物理実体データ非依存）
-  sync_network  → 同期ネットワーク（同時相関）
-  causal_network→ 因果ネットワーク（ラグ付き相関）
-  async_network → （廃止：距離概念なし）
-  residue_bridge→ （廃止）
-
-天気データでの解釈例:
-  sync:   「湿度と露点が常に同時に動く」
-  causal: 「気温が動いた3時間後に気圧が動く」
-  pattern: parallel（全次元同時変化）/ cascade（伝播的変化）
-
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -26,44 +9,47 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-logger = logging.getLogger("bankai.analysis.network_analyzer_core")
+logger = logging.getLogger("getter_one.analysis.network_analyzer_core")
 
 
 # ============================================
 # Data Classes
 # ============================================
 
+
 @dataclass
 class DimensionLink:
     """次元間ネットワークリンク"""
+
     from_dim: int
     to_dim: int
     from_name: str
     to_name: str
-    link_type: str          # 'sync' or 'causal'
-    strength: float         # 相関の絶対値
-    correlation: float      # 相関の符号付き値（正/負の相関を区別）
-    lag: int = 0            # causalの場合のラグ（フレーム数）
+    link_type: str  # 'sync' or 'causal'
+    strength: float  # 相関の絶対値
+    correlation: float  # 相関の符号付き値（正/負の相関を区別）
+    lag: int = 0  # causalの場合のラグ（フレーム数）
 
 
 @dataclass
 class NetworkResult:
     """ネットワーク解析結果"""
+
     sync_network: list[DimensionLink] = field(default_factory=list)
     causal_network: list[DimensionLink] = field(default_factory=list)
 
     # 相関行列（生データ）
-    sync_matrix: np.ndarray | None = None      # (n_dims, n_dims)
-    causal_matrix: np.ndarray | None = None     # (n_dims, n_dims) 最大ラグ相関
+    sync_matrix: np.ndarray | None = None  # (n_dims, n_dims)
+    causal_matrix: np.ndarray | None = None  # (n_dims, n_dims) 最大ラグ相関
     causal_lag_matrix: np.ndarray | None = None  # (n_dims, n_dims) 最適ラグ
 
     # ネットワーク特性
-    pattern: str = "unknown"         # 'parallel', 'cascade', 'mixed'
+    pattern: str = "unknown"  # 'parallel', 'cascade', 'mixed'
     hub_dimensions: list[int] = field(default_factory=list)
     hub_names: list[str] = field(default_factory=list)
 
     # 因果構造
-    causal_drivers: list[int] = field(default_factory=list)   # 駆動次元
+    causal_drivers: list[int] = field(default_factory=list)  # 駆動次元
     causal_followers: list[int] = field(default_factory=list)  # 従属次元
     driver_names: list[str] = field(default_factory=list)
     follower_names: list[str] = field(default_factory=list)
@@ -74,10 +60,14 @@ class NetworkResult:
     n_causal_links: int = 0
     dimension_names: list[str] = field(default_factory=list)
 
+    # adaptive パラメータ（使用時のみ）
+    adaptive_params: dict | None = None
+
 
 @dataclass
 class CooperativeEventNetwork:
     """cooperative event発生時のネットワーク構造"""
+
     event_frame: int
     event_timestamp: str | None = None
     delta_lambda_c: float = 0.0
@@ -95,6 +85,7 @@ class CooperativeEventNetwork:
 # Network Analyzer Core
 # ============================================
 
+
 class NetworkAnalyzerCore:
     """
     汎用次元間ネットワーク解析
@@ -105,11 +96,13 @@ class NetworkAnalyzerCore:
     Parameters
     ----------
     sync_threshold : float
-        同期ネットワーク判定閾値（相関の絶対値）
+        同期ネットワーク判定閾値（adaptive=Trueならヒント値）
     causal_threshold : float
-        因果ネットワーク判定閾値（ラグ付き相関の絶対値）
+        因果ネットワーク判定閾値（adaptive=Trueならヒント値）
     max_lag : int
-        因果推定の最大ラグ（フレーム数）
+        因果推定の最大ラグ（adaptive=Trueならヒント値）
+    adaptive : bool
+        データ駆動の適応的パラメータ調整を有効にする
     """
 
     def __init__(
@@ -117,15 +110,196 @@ class NetworkAnalyzerCore:
         sync_threshold: float = 0.5,
         causal_threshold: float = 0.4,
         max_lag: int = 12,
+        adaptive: bool = True,
     ):
+        # ユーザー指定値（adaptive=True ならヒント値）
+        self.sync_threshold_hint = sync_threshold
+        self.causal_threshold_hint = causal_threshold
+        self.max_lag_hint = max_lag
+        self.adaptive = adaptive
+
+        # 実行時に更新されるパラメータ
         self.sync_threshold = sync_threshold
         self.causal_threshold = causal_threshold
         self.max_lag = max_lag
 
+        # 適応的パラメータの計算結果を保持
+        self.adaptive_params: dict | None = None
+
         logger.info(
             f"✅ NetworkAnalyzerCore initialized "
-            f"(sync>{sync_threshold}, causal>{causal_threshold}, max_lag={max_lag})"
+            f"(sync>{sync_threshold}, causal>{causal_threshold}, "
+            f"max_lag={max_lag}, adaptive={adaptive})"
         )
+
+    # ================================================================
+    # Adaptive Parameter Computation
+    # ================================================================
+
+    def _compute_adaptive_parameters(
+        self,
+        state_vectors: np.ndarray,
+    ) -> dict:
+        """
+        データ駆動の適応的パラメータ計算
+
+        CascadeTrackerのadaptive機構と同一の5指標から
+        ネットワーク解析用の閾値・ラグを動的に算出する。
+
+        指標:
+          1. グローバルボラティリティ（全体の変動度）
+          2. 時間的変動性（隣接フレーム間の変化率）
+          3. 次元間相関構造の複雑度
+          4. 局所的変動パターン（非定常性）
+          5. スペクトル特性（低周波支配度）
+
+        Returns
+        -------
+        dict
+            sync_threshold, causal_threshold, max_lag, scale_factor,
+            volatility_metrics
+        """
+        n_frames, n_dims = state_vectors.shape
+
+        # ── 1. グローバルボラティリティ ──
+        global_std = np.std(state_vectors)
+        global_mean = np.mean(np.abs(state_vectors))
+        volatility_ratio = global_std / (global_mean + 1e-10)
+
+        # ── 2. 時間的変動性（隣接フレーム間の変化率）──
+        temporal_changes = np.diff(state_vectors, axis=0)
+        temporal_volatility = np.mean(np.std(temporal_changes, axis=0))
+
+        # ── 3. 次元間の相関構造の複雑度 ──
+        if n_dims > 1:
+            corr_matrix = np.corrcoef(state_vectors.T)
+            triu = corr_matrix[np.triu_indices(n_dims, k=1)]
+            triu = triu[~np.isnan(triu)]
+            correlation_complexity = (
+                1.0 - np.mean(np.abs(triu)) if len(triu) > 0 else 0.5
+            )
+            mean_abs_corr = np.mean(np.abs(triu)) if len(triu) > 0 else 0.0
+        else:
+            correlation_complexity = 0.5
+            mean_abs_corr = 0.0
+
+        # ── 4. 局所的変動パターン ──
+        base_window = max(10, n_frames // 10)
+        local_volatilities = []
+        for i in range(0, n_frames - base_window, max(1, base_window // 2)):
+            window_data = state_vectors[i : i + base_window]
+            local_volatilities.append(np.std(window_data))
+
+        if len(local_volatilities) > 1:
+            volatility_variation = np.std(local_volatilities) / (
+                np.mean(local_volatilities) + 1e-10
+            )
+        else:
+            volatility_variation = 0.5
+
+        # ── 5. スペクトル解析（支配的周期の推定）──
+        fft_mag = np.abs(np.fft.fft(state_vectors, axis=0))
+        low_cutoff = max(1, n_frames // 10)
+        high_cutoff = max(2, n_frames // 2)
+        low_freq_ratio = np.sum(fft_mag[:low_cutoff]) / (
+            np.sum(fft_mag[:high_cutoff]) + 1e-10
+        )
+
+        # ── sync_threshold の動的調整 ──
+        # ボラティリティが高い → 閾値を上げる（ノイズに強く）
+        # 相関が全体的に高い → 閾値を上げる（意味のある相関だけ拾う）
+        # 相関が全体的に低い → 閾値を下げる（微弱な構造も拾う）
+        sync_adj = 0.0
+        if volatility_ratio > 2.0:
+            sync_adj += 0.1
+        elif volatility_ratio < 0.3:
+            sync_adj -= 0.1
+
+        if mean_abs_corr > 0.6:
+            sync_adj += 0.1  # 相関が強い系 → 閾値を上げて選別
+        elif mean_abs_corr < 0.2:
+            sync_adj -= 0.1  # 相関が弱い系 → 閾値を下げて拾う
+
+        if volatility_variation > 1.0:
+            sync_adj += 0.05  # 非定常 → やや厳しめに
+
+        sync_threshold = np.clip(self.sync_threshold_hint + sync_adj, 0.15, 0.85)
+
+        # ── causal_threshold の動的調整 ──
+        # 時間的変動が小さい → 閾値を下げる（微細な因果も拾う）
+        # 次元が多い → 閾値を上げる（偽因果を抑制）
+        causal_adj = 0.0
+        if temporal_volatility < global_std * 0.3:
+            causal_adj -= 0.1  # 静かな系 → 小さい因果も拾う
+        elif temporal_volatility > global_std * 2.0:
+            causal_adj += 0.1  # 激しい系 → 厳しめに
+
+        if n_dims > 50:
+            causal_adj += 0.1  # 多次元 → 偽因果リスクが高い
+        elif n_dims <= 5:
+            causal_adj -= 0.05  # 低次元 → 緩めでOK
+
+        if correlation_complexity > 0.7:
+            causal_adj -= 0.05  # 複雑な相関 → 因果を丁寧に拾う
+
+        causal_threshold = np.clip(self.causal_threshold_hint + causal_adj, 0.15, 0.80)
+
+        # ── max_lag の動的調整 ──
+        # 低周波支配 → ラグを伸ばす（ゆっくり伝播する系）
+        # 高周波支配 → ラグを縮める（速い伝播）
+        # データ長に応じてクリップ
+        scale_factor = 1.0
+        if low_freq_ratio > 0.8:
+            scale_factor *= 1.5
+        elif low_freq_ratio < 0.3:
+            scale_factor *= 0.7
+
+        if correlation_complexity > 0.7:
+            scale_factor *= 1.3  # 複雑な相関 → 伝播が遅い可能性
+
+        if temporal_volatility > global_std * 2.0:
+            scale_factor *= 0.8  # 変動が激しい → 短いラグで十分
+
+        raw_lag = int(self.max_lag_hint * scale_factor)
+        max_lag = int(np.clip(raw_lag, 3, max(5, n_frames // 5)))
+
+        params = {
+            "sync_threshold": float(sync_threshold),
+            "causal_threshold": float(causal_threshold),
+            "max_lag": max_lag,
+            "scale_factor": float(scale_factor),
+            "volatility_metrics": {
+                "global_volatility": float(volatility_ratio),
+                "temporal_volatility": float(temporal_volatility),
+                "correlation_complexity": float(correlation_complexity),
+                "local_variation": float(volatility_variation),
+                "low_freq_ratio": float(low_freq_ratio),
+                "mean_abs_corr": float(mean_abs_corr),
+            },
+        }
+
+        logger.info(
+            f"   Adaptive params: "
+            f"sync_th={sync_threshold:.3f} "
+            f"(hint={self.sync_threshold_hint}), "
+            f"causal_th={causal_threshold:.3f} "
+            f"(hint={self.causal_threshold_hint}), "
+            f"max_lag={max_lag} (hint={self.max_lag_hint})"
+        )
+        logger.info(
+            f"   Volatility: global={volatility_ratio:.3f}, "
+            f"temporal={temporal_volatility:.3f}, "
+            f"corr_complexity={correlation_complexity:.3f}, "
+            f"local_var={volatility_variation:.3f}, "
+            f"low_freq={low_freq_ratio:.3f}, "
+            f"mean_corr={mean_abs_corr:.3f}"
+        )
+
+        return params
+
+    # ================================================================
+    # Main Entry Point
+    # ================================================================
 
     def analyze(
         self,
@@ -158,18 +332,26 @@ class NetworkAnalyzerCore:
         if window is None:
             window = n_frames
 
+        # adaptive パラメータ計算
+        if self.adaptive:
+            self.adaptive_params = self._compute_adaptive_parameters(state_vectors)
+            self.sync_threshold = self.adaptive_params["sync_threshold"]
+            self.causal_threshold = self.adaptive_params["causal_threshold"]
+            self.max_lag = self.adaptive_params["max_lag"]
+
         logger.info(
             f"🔍 Analyzing {n_dims}-dimensional network "
-            f"({n_frames} frames, window={window})"
+            f"({n_frames} frames, window={window}, "
+            f"sync>{self.sync_threshold:.3f}, "
+            f"causal>{self.causal_threshold:.3f}, "
+            f"max_lag={self.max_lag})"
         )
 
         # 1. 相関計算
         correlations = self._compute_correlations(state_vectors, window)
 
         # 2. ネットワーク構築
-        sync_links, causal_links = self._build_networks(
-            correlations, dimension_names
-        )
+        sync_links, causal_links = self._build_networks(correlations, dimension_names)
 
         # 3. パターン識別
         pattern = self._identify_pattern(sync_links, causal_links)
@@ -178,9 +360,7 @@ class NetworkAnalyzerCore:
         hub_dims = self._detect_hubs(sync_links, causal_links, n_dims)
 
         # 5. 因果構造（ドライバー/フォロワー）
-        drivers, followers = self._identify_causal_structure(
-            causal_links, n_dims
-        )
+        drivers, followers = self._identify_causal_structure(causal_links, n_dims)
 
         result = NetworkResult(
             sync_network=sync_links,
@@ -199,6 +379,7 @@ class NetworkAnalyzerCore:
             n_sync_links=len(sync_links),
             n_causal_links=len(causal_links),
             dimension_names=dimension_names,
+            adaptive_params=self.adaptive_params,
         )
 
         self._print_summary(result)
@@ -217,17 +398,6 @@ class NetworkAnalyzerCore:
 
         イベント前後のウィンドウで因果構造を分析し、
         どの次元がイベントを「発火」させたかを推定する。
-
-        Parameters
-        ----------
-        state_vectors : np.ndarray (n_frames, n_dims)
-        event_frame : int
-            イベント発生フレーム
-        window_before : int
-            イベント前の解析ウィンドウ
-        window_after : int
-            イベント後の解析ウィンドウ
-        dimension_names : list[str], optional
         """
         n_frames, n_dims = state_vectors.shape
 
@@ -263,9 +433,7 @@ class NetworkAnalyzerCore:
     # 相関計算
     # ================================================================
 
-    def _compute_correlations(
-        self, state_vectors: np.ndarray, window: int
-    ) -> dict:
+    def _compute_correlations(self, state_vectors: np.ndarray, window: int) -> dict:
         """全次元ペアの相関計算（同期・因果）"""
         n_frames, n_dims = state_vectors.shape
         w = min(window, n_frames)
@@ -350,21 +518,24 @@ class NetworkAnalyzerCore:
 
                 # 同期リンク
                 if abs(sync_corr) > self.sync_threshold:
-                    sync_links.append(DimensionLink(
-                        from_dim=i,
-                        to_dim=j,
-                        from_name=dimension_names[i],
-                        to_name=dimension_names[j],
-                        link_type="sync",
-                        strength=abs(sync_corr),
-                        correlation=sync_corr,
-                    ))
+                    sync_links.append(
+                        DimensionLink(
+                            from_dim=i,
+                            to_dim=j,
+                            from_name=dimension_names[i],
+                            to_name=dimension_names[j],
+                            link_type="sync",
+                            strength=abs(sync_corr),
+                            correlation=sync_corr,
+                        )
+                    )
 
                 # 因果リンク
                 # 同期相関より有意にラグ相関が強い場合のみ因果と判定
-                if (abs(causal_corr) > self.causal_threshold
-                        and abs(causal_corr) > abs(sync_corr) * 1.1):
-
+                if (
+                    abs(causal_corr) > self.causal_threshold
+                    and abs(causal_corr) > abs(sync_corr) * 1.1
+                ):
                     # ラグの符号で因果の方向を決定
                     if lag > 0:
                         from_d, to_d = i, j
@@ -372,16 +543,18 @@ class NetworkAnalyzerCore:
                         from_d, to_d = j, i
                         lag = abs(lag)
 
-                    causal_links.append(DimensionLink(
-                        from_dim=from_d,
-                        to_dim=to_d,
-                        from_name=dimension_names[from_d],
-                        to_name=dimension_names[to_d],
-                        link_type="causal",
-                        strength=abs(causal_corr),
-                        correlation=causal_corr,
-                        lag=lag,
-                    ))
+                    causal_links.append(
+                        DimensionLink(
+                            from_dim=from_d,
+                            to_dim=to_d,
+                            from_name=dimension_names[from_d],
+                            to_name=dimension_names[to_d],
+                            link_type="causal",
+                            strength=abs(causal_corr),
+                            correlation=causal_corr,
+                            lag=lag,
+                        )
+                    )
 
         return sync_links, causal_links
 
@@ -401,9 +574,9 @@ class NetworkAnalyzerCore:
         if n_sync == 0 and n_causal == 0:
             return "independent"
         elif n_sync > n_causal * 2:
-            return "parallel"     # 同期的協調（全次元が同時に動く）
+            return "parallel"  # 同期的協調（全次元が同時に動く）
         elif n_causal > n_sync * 2:
-            return "cascade"      # カスケード伝播（次元間に時間差）
+            return "cascade"  # カスケード伝播（次元間に時間差）
         else:
             return "mixed"
 
@@ -436,7 +609,7 @@ class NetworkAnalyzerCore:
     ) -> tuple[list[int], list[int]]:
         """因果構造の特定（ドライバー/フォロワー）"""
         out_degree = np.zeros(n_dims)  # 駆動する側
-        in_degree = np.zeros(n_dims)   # 駆動される側
+        in_degree = np.zeros(n_dims)  # 駆動される側
 
         for link in causal_links:
             out_degree[link.from_dim] += link.strength
@@ -474,7 +647,7 @@ class NetworkAnalyzerCore:
         イベント直前のウィンドウで最も早く・大きく動き始めた次元を特定。
         """
         start = max(0, event_frame - lookback)
-        pre_event = state_vectors[start:event_frame + 1]
+        pre_event = state_vectors[start : event_frame + 1]
 
         if len(pre_event) < 3:
             return []
@@ -508,7 +681,7 @@ class NetworkAnalyzerCore:
         各次元が閾値を超えた最初のフレームで順序付け。
         """
         start = max(0, event_frame - lookback)
-        window = state_vectors[start:event_frame + 1]
+        window = state_vectors[start : event_frame + 1]
 
         if len(window) < 3:
             return list(range(n_dims))
@@ -534,7 +707,7 @@ class NetworkAnalyzerCore:
     # 出力
     # ================================================================
 
-    def _print_summary(self, result: NetworkResult):
+    def _print_summary(self, result: NetworkResult) -> None:
         """結果サマリーの表示"""
         logger.info("=" * 50)
         logger.info("Network Analysis Summary")
@@ -554,18 +727,23 @@ class NetworkAnalyzerCore:
 
         if result.sync_network:
             logger.info("  Sync Network:")
-            for link in sorted(result.sync_network,
-                              key=lambda lnk: lnk.strength, reverse=True):
+            for link in sorted(
+                result.sync_network,
+                key=lambda lnk: lnk.strength,
+                reverse=True,
+            ):
                 sign = "+" if link.correlation > 0 else "−"
                 logger.info(
-                    f"    {link.from_name} ↔ {link.to_name}: "
-                    f"{sign}{link.strength:.3f}"
+                    f"    {link.from_name} ↔ {link.to_name}: {sign}{link.strength:.3f}"
                 )
 
         if result.causal_network:
             logger.info("  Causal Network:")
-            for link in sorted(result.causal_network,
-                              key=lambda lnk: lnk.strength, reverse=True):
+            for link in sorted(
+                result.causal_network,
+                key=lambda lnk: lnk.strength,
+                reverse=True,
+            ):
                 logger.info(
                     f"    {link.from_name} → {link.to_name}: "
                     f"{link.strength:.3f} (lag={link.lag})"
