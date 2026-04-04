@@ -1,6 +1,23 @@
 """
 Network Analyzer Core - Domain-Agnostic
 ========================================
+
+BANKAI-MDのthird_impact_analytics.pyの汎用版。
+N次元時系列データの次元間ネットワーク構造を解析する。
+
+MD版との対応:
+  atom          → dimension（次元/チャネル）
+  residue       → （廃止：物理実体データ非依存）
+  sync_network  → 同期ネットワーク（同時相関）
+  causal_network→ 因果ネットワーク（ラグ付き相関）
+  async_network → （廃止：距離概念なし）
+  residue_bridge→ （廃止）
+
+天気データでの解釈例:
+  sync:   「湿度と露点が常に同時に動く」
+  causal: 「気温が動いた3時間後に気圧が動く」
+  pattern: parallel（全次元同時変化）/ cascade（伝播的変化）
+
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -353,6 +370,9 @@ class NetworkAnalyzerCore:
         # 2. ネットワーク構築
         sync_links, causal_links = self._build_networks(correlations, dimension_names)
 
+        # 2.5. 共通祖先フィルタ（偽因果除去）
+        causal_links = self._filter_spurious_edges(causal_links)
+
         # 3. パターン識別
         pattern = self._identify_pattern(sync_links, causal_links)
 
@@ -434,7 +454,12 @@ class NetworkAnalyzerCore:
     # ================================================================
 
     def _compute_correlations(self, state_vectors: np.ndarray, window: int) -> dict:
-        """全次元ペアの相関計算（同期・因果）"""
+        """
+        全次元ペアの相関計算（同期・因果）
+
+        n_dims >= 3 の場合は偏相関を使用し、交絡変数の影響を除去する。
+        n_dims < 3 の場合はペアワイズ相関にフォールバック。
+        """
         n_frames, n_dims = state_vectors.shape
         w = min(window, n_frames)
 
@@ -446,44 +471,46 @@ class NetworkAnalyzerCore:
         # 生データの相関だとトレンドに引きずられるため
         displacement = np.diff(state_vectors[:w], axis=0)
 
+        use_partial = n_dims >= 3
+
+        # ── 同期偏相関: 精度行列方式（効率的に全ペア同時計算）──
+        if use_partial:
+            sync_matrix = self._compute_partial_corr_precision(displacement)
+        else:
+            for i in range(n_dims):
+                for j in range(i + 1, n_dims):
+                    ts_i = displacement[:, i]
+                    ts_j = displacement[:, j]
+                    if np.std(ts_i) < 1e-10 or np.std(ts_j) < 1e-10:
+                        continue
+                    corr = np.corrcoef(ts_i, ts_j)[0, 1]
+                    if np.isnan(corr):
+                        corr = 0.0
+                    sync_matrix[i, j] = corr
+                    sync_matrix[j, i] = corr
+
+        # ── ラグ付き偏相関（因果推定）: 残差方式 ──
         for i in range(n_dims):
             for j in range(i + 1, n_dims):
-                ts_i = displacement[:, i]
-                ts_j = displacement[:, j]
-
-                # ゼロ分散チェック
-                if np.std(ts_i) < 1e-10 or np.std(ts_j) < 1e-10:
-                    continue
-
-                # ── 同期相関 ──
-                sync_corr = np.corrcoef(ts_i, ts_j)[0, 1]
-                if np.isnan(sync_corr):
-                    sync_corr = 0.0
-                sync_matrix[i, j] = sync_corr
-                sync_matrix[j, i] = sync_corr
-
-                # ── ラグ付き相関（因果推定） ──
                 best_corr = 0.0
                 best_lag = 0
 
-                for lag in range(1, min(self.max_lag + 1, len(ts_i) - 1)):
+                for lag in range(1, min(self.max_lag + 1, len(displacement) - 1)):
                     # i → j（iがlagフレーム先行）
-                    corr_ij = np.corrcoef(ts_i[:-lag], ts_j[lag:])[0, 1]
-                    if np.isnan(corr_ij):
-                        corr_ij = 0.0
-
+                    corr_ij = self._lagged_partial_corr(
+                        displacement, i, j, lag, use_partial
+                    )
                     if abs(corr_ij) > abs(best_corr):
                         best_corr = corr_ij
                         best_lag = lag
 
                     # j → i（jがlagフレーム先行）
-                    corr_ji = np.corrcoef(ts_j[:-lag], ts_i[lag:])[0, 1]
-                    if np.isnan(corr_ji):
-                        corr_ji = 0.0
-
+                    corr_ji = self._lagged_partial_corr(
+                        displacement, j, i, lag, use_partial
+                    )
                     if abs(corr_ji) > abs(best_corr):
                         best_corr = corr_ji
-                        best_lag = -lag  # 負のラグ = jが先行
+                        best_lag = -lag
 
                 max_lagged_matrix[i, j] = best_corr
                 max_lagged_matrix[j, i] = best_corr
@@ -495,6 +522,127 @@ class NetworkAnalyzerCore:
             "max_lagged": max_lagged_matrix,
             "best_lag": best_lag_matrix,
         }
+
+    @staticmethod
+    def _compute_partial_corr_precision(data: np.ndarray) -> np.ndarray:
+        """
+        精度行列（逆共分散行列）から偏相関行列を計算
+
+        pcorr(i,j) = -P[i,j] / sqrt(P[i,i] * P[j,j])
+
+        交絡変数の影響が自動的に除去される。
+        """
+        n_dims = data.shape[1]
+        cov = np.cov(data.T)
+
+        # 特異行列対策: 正則化
+        cov += np.eye(n_dims) * 1e-8
+
+        try:
+            precision = np.linalg.inv(cov)
+        except np.linalg.LinAlgError:
+            precision = np.linalg.pinv(cov)
+
+        # 偏相関に変換
+        diag = np.sqrt(np.abs(np.diag(precision)))
+        diag[diag < 1e-10] = 1e-10
+        partial_corr = np.zeros((n_dims, n_dims))
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                pc = -precision[i, j] / (diag[i] * diag[j])
+                pc = np.clip(pc, -1.0, 1.0)
+                partial_corr[i, j] = pc
+                partial_corr[j, i] = pc
+
+        return partial_corr
+
+    @staticmethod
+    def _lagged_partial_corr(
+        displacement: np.ndarray,
+        src: int,
+        dst: int,
+        lag: int,
+        use_partial: bool,
+    ) -> float:
+        """
+        ラグ付き偏相関の計算（多重ラグ残差方式）
+
+        src → dst (lag) の因果相関を計算する際、
+        他の全次元の同時刻＋複数ラグの影響を除去する。
+        これにより交絡変数のラグ経由の影響も除去できる。
+        """
+        n_samples, n_dims = displacement.shape
+        if lag >= n_samples - 1:
+            return 0.0
+
+        ts_src = displacement[:-lag, src]
+        ts_dst = displacement[lag:, dst]
+        n = min(len(ts_src), len(ts_dst))
+        ts_src = ts_src[:n]
+        ts_dst = ts_dst[:n]
+
+        if np.std(ts_src) < 1e-10 or np.std(ts_dst) < 1e-10:
+            return 0.0
+
+        if not use_partial or n_dims < 3:
+            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
+            return 0.0 if np.isnan(corr) else float(corr)
+
+        # 条件付き変数: src,dst以外の全次元の複数ラグ値
+        other_dims = [d for d in range(n_dims) if d != src and d != dst]
+        if not other_dims:
+            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
+            return 0.0 if np.isnan(corr) else float(corr)
+
+        # 複数ラグの条件付き変数を構築
+        max_cond_lag = min(lag + 2, n - 1)
+        z_parts = []
+        for cl in range(max_cond_lag + 1):
+            start_s = max(0, cl)
+            end_s = start_s + n
+            if end_s <= len(displacement) - lag + cl:
+                z_lag = displacement[start_s:end_s, :][:, other_dims]
+                if len(z_lag) >= n:
+                    z_parts.append(z_lag[:n])
+
+        if not z_parts:
+            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
+            return 0.0 if np.isnan(corr) else float(corr)
+
+        z = np.hstack(z_parts)
+
+        # 特異行列対策
+        z_std = np.std(z, axis=0)
+        valid_cols = z_std > 1e-10
+        if not np.any(valid_cols):
+            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
+            return 0.0 if np.isnan(corr) else float(corr)
+        z = z[:, valid_cols]
+
+        # 多重共線性対策: 条件数が高すぎる場合はSVDで次元削減
+        if z.shape[1] > z.shape[0] // 2:
+            try:
+                u, s, _ = np.linalg.svd(z, full_matrices=False)
+                cumvar = np.cumsum(s**2) / np.sum(s**2)
+                n_keep = max(1, int(np.searchsorted(cumvar, 0.95)) + 1)
+                z = u[:, :n_keep] * s[:n_keep]
+            except np.linalg.LinAlgError:
+                pass
+
+        # 線形回帰で条件付き変数の影響を除去
+        try:
+            z_pinv = np.linalg.pinv(z)
+            resid_src = ts_src - z @ (z_pinv @ ts_src)
+            resid_dst = ts_dst - z @ (z_pinv @ ts_dst)
+        except np.linalg.LinAlgError:
+            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
+            return 0.0 if np.isnan(corr) else float(corr)
+
+        if np.std(resid_src) < 1e-10 or np.std(resid_dst) < 1e-10:
+            return 0.0
+
+        corr = np.corrcoef(resid_src, resid_dst)[0, 1]
+        return 0.0 if np.isnan(corr) else float(corr)
 
     # ================================================================
     # ネットワーク構築
@@ -557,6 +705,75 @@ class NetworkAnalyzerCore:
                     )
 
         return sync_links, causal_links
+
+    def _filter_spurious_edges(
+        self,
+        causal_links: list[DimensionLink],
+    ) -> list[DimensionLink]:
+        """
+        共通祖先による偽因果エッジの除去
+
+        A→B が検出された時、Z→A かつ Z→B が両方 A→B より強い
+        共通祖先 Z が存在する場合、A→B を偽因果として除去する。
+
+        これにより偏相関で除去しきれない交絡変数のラグ経由の
+        影響を、グラフ構造レベルで検出・除去できる。
+        """
+        if len(causal_links) < 3:
+            return causal_links
+
+        # 因果リンクの高速参照用辞書: (from, to) -> link
+        link_map: dict[tuple[int, int], DimensionLink] = {}
+        for link in causal_links:
+            key = (link.from_dim, link.to_dim)
+            if key not in link_map or link.strength > link_map[key].strength:
+                link_map[key] = link
+
+        filtered = []
+        n_removed = 0
+
+        for link in causal_links:
+            a, b = link.from_dim, link.to_dim
+            has_common_ancestor = False
+
+            # 全候補 Z について Z→A, Z→B の存在をチェック
+            for (z_src, z_dst), z_link_a in link_map.items():
+                if z_dst != a:
+                    continue
+                z = z_src
+                if z == a or z == b:
+                    continue
+
+                # Z→B も存在するか？
+                z_link_b = link_map.get((z, b))
+                if z_link_b is None:
+                    continue
+
+                # Z→A が A→B より強く、Z→B も存在
+                # → A は Z に駆動されており、A→B は Z の影響の反映
+                if z_link_a.strength > link.strength:
+                    has_common_ancestor = True
+                    logger.debug(
+                        f"   🔍 Spurious edge removed: "
+                        f"{link.from_name}→{link.to_name} "
+                        f"(confounder: {z_link_a.from_name}, "
+                        f"strength {link.strength:.3f} < "
+                        f"{z_link_a.strength:.3f}, {z_link_b.strength:.3f})"
+                    )
+                    break
+
+            if has_common_ancestor:
+                n_removed += 1
+            else:
+                filtered.append(link)
+
+        if n_removed > 0:
+            logger.info(
+                f"   🔍 Spurious edge filter: {n_removed} removed, "
+                f"{len(filtered)} retained"
+            )
+
+        return filtered
 
     # ================================================================
     # パターン識別・ハブ検出・因果構造
