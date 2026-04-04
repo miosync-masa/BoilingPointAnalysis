@@ -9,6 +9,7 @@ Components:
     - GPUBackend: GPU/CPU自動切り替えの基底クラス
     - GPUMemoryManager: メモリ管理システム
     - CUDAKernels: 高速カスタムカーネル集
+    - InverseKernels: 逆問題検証カーネル（GPU ONLY 🔥）
     - Decorators: プロファイリングとエラーハンドリング
 """
 
@@ -17,7 +18,7 @@ Components:
 from .gpu_kernels import (
     CUDAKernels,
     anomaly_detection_kernel,
-    benchmark_kernels,  # クォート修正済み！
+    benchmark_kernels,
     compute_gradient_kernel,
     compute_local_fractal_dimension_kernel,
     create_elementwise_kernel,
@@ -40,6 +41,19 @@ from .gpu_memory import (
     get_memory_summary,
 )
 from .gpu_utils import GPUBackend, auto_select_device, handle_gpu_errors, profile_gpu
+
+# GPU ONLY: gpu_inverse は CuPy が無い環境ではスキップ
+try:
+    from .gpu_inverse import (
+        InverseKernels,
+        compute_gram_matrix,
+        compute_path_statistics,
+        inverse_verify_all,
+    )
+
+    _HAS_INVERSE_KERNELS = True
+except ImportError:
+    _HAS_INVERSE_KERNELS = False
 
 __all__ = [
     # Utils
@@ -68,13 +82,14 @@ __all__ = [
     "create_elementwise_kernel",
     "benchmark_kernels",
     "get_kernel_manager",
+    # Inverse Kernels (GPU ONLY)
+    "InverseKernels",
+    "compute_gram_matrix",
+    "compute_path_statistics",
+    "inverse_verify_all",
 ]
-
-# バージョン情報
-__version__ = "3.0.0"
-
 # 初期化メッセージ
 import logging
 
-logger = logging.getLogger("bankai.core")
-logger.debug("Lambda³ GPU Core initialized")
+logger = logging.getLogger("getter_one.core")
+logger.debug("Getter_one GPU Core initialized")
