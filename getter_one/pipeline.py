@@ -37,9 +37,11 @@ logger = logging.getLogger("getter_one.pipeline")
 # Pipeline Config
 # ============================================================
 
+
 @dataclass
 class PipelineConfig:
     """パイプライン設定"""
+
     # Λ³構造
     window_steps: int = 24
 
@@ -47,12 +49,15 @@ class PipelineConfig:
     enable_boundary: bool = True
     enable_topology: bool = True
     enable_anomaly: bool = True
+    enable_extended: bool = True  # 拡張検出（周期・ドリフト・緩慢遷移）
+    enable_phase_space: bool = True  # 位相空間解析
 
     # Network
     enable_network: bool = True
     sync_threshold: float = 0.3
     causal_threshold: float = 0.25
     max_lag: int = 12
+    adaptive_network: bool = True  # データ駆動の閾値調整
 
     # Confidence
     enable_confidence: bool = True
@@ -73,9 +78,11 @@ class PipelineConfig:
 # Pipeline Result
 # ============================================================
 
+
 @dataclass
 class PipelineResult:
     """パイプライン全結果"""
+
     # 入力データ
     dataset: GetterDataset | None = None
 
@@ -86,6 +93,8 @@ class PipelineResult:
     structural_boundaries: dict = field(default_factory=dict)
     topological_breaks: dict = field(default_factory=dict)
     anomaly_scores: dict = field(default_factory=dict)
+    extended_detection: dict = field(default_factory=dict)  # NEW
+    phase_space_analysis: dict = field(default_factory=dict)  # NEW
 
     # Network
     network: NetworkResult | None = None
@@ -104,6 +113,7 @@ class PipelineResult:
 # ============================================================
 # Main Pipeline
 # ============================================================
+
 
 def run(
     source,
@@ -141,6 +151,7 @@ def run(
         dataset = source
     elif isinstance(source, np.ndarray):
         from .data.loader import from_numpy
+
         dataset = from_numpy(source, normalize=kwargs.pop("normalize", "range"))
     else:
         dataset = load(source, **kwargs)
@@ -156,7 +167,7 @@ def run(
 
     # ── 2. Λ³構造計算 ──
     if config.verbose:
-        print(f"\n  [1/5] Computing Lambda³ structures (window={config.window_steps})...")
+        print(f"\n  [1] Computing Lambda³ structures (window={config.window_steps})...")
 
     core = LambdaStructuresCore()
     result.lambda_structures = core.compute_lambda_structures(
@@ -165,13 +176,16 @@ def run(
         dimension_names=dataset.dimension_names,
     )
 
-    # ── 3. Detection ──
+    # ── 3. Detection (基本) ──
     if config.verbose:
-        print("  [2/5] Running detection modules...")
+        print("  [2] Running detection modules...")
 
     if config.enable_boundary:
         try:
-            from .detection.boundary_detection_gpu import BoundaryDetectorGPU
+            from .detection.boundary_detection_gpu import (
+                BoundaryDetectorGPU,
+            )
+
             detector = BoundaryDetectorGPU(force_cpu=True)
             boundary_window = max(10, config.window_steps // 3)
             result.structural_boundaries = detector.detect_structural_boundaries(
@@ -185,7 +199,10 @@ def run(
 
     if config.enable_topology:
         try:
-            from .detection.topology_breaks_gpu import TopologyBreaksDetectorGPU
+            from .detection.topology_breaks_gpu import (
+                TopologyBreaksDetectorGPU,
+            )
+
             detector = TopologyBreaksDetectorGPU(force_cpu=True)
             fast_window = max(10, config.window_steps // 2)
             result.topological_breaks = detector.detect_topological_breaks(
@@ -198,7 +215,10 @@ def run(
 
     if config.enable_anomaly:
         try:
-            from .detection.anomaly_detection_gpu import AnomalyDetectorGPU
+            from .detection.anomaly_detection_gpu import (
+                AnomalyDetectorGPU,
+            )
+
             detector = AnomalyDetectorGPU(force_cpu=True)
 
             # MDConfigの代わりに最小限の設定オブジェクトを作成
@@ -227,15 +247,86 @@ def run(
         except Exception as e:
             logger.warning(f"Anomaly detection failed: {e}")
 
-    # ── 4. Network ──
+    # ── 4. Detection (拡張) ──
+    if config.enable_extended:
+        if config.verbose:
+            print("  [3a] Running extended detection...")
+        try:
+            from .detection.extended_detection_gpu import (
+                ExtendedDetectorGPU,
+            )
+
+            ext_detector = ExtendedDetectorGPU(force_cpu=True)
+            n_frames = dataset.n_frames
+
+            # 周期検出（データ長に応じたパラメータ調整）
+            min_period = max(10, n_frames // 100)
+            max_period = max(100, n_frames // 2)
+            periodic = ext_detector.detect_periodic_transitions(
+                result.lambda_structures,
+                min_period=min_period,
+                max_period=max_period,
+            )
+            result.extended_detection["periodic"] = periodic
+
+            # 緩慢遷移検出
+            gradual = ext_detector.detect_gradual_transitions(
+                result.lambda_structures,
+            )
+            result.extended_detection["gradual"] = gradual
+
+            # 構造ドリフト検出
+            drift = ext_detector.detect_structural_drift(
+                result.lambda_structures,
+            )
+            result.extended_detection["drift"] = drift
+
+            if config.verbose:
+                n_periodic = len(periodic.get("detected_periods", []))
+                print(f"         Periodic: {n_periodic} periods detected")
+                print("         Gradual transitions: computed")
+                print("         Structural drift: computed")
+        except Exception as e:
+            logger.warning(f"Extended detection failed: {e}")
+
+    # ── 5. Detection (位相空間) ──
+    if config.enable_phase_space:
+        if config.verbose:
+            print("  [3b] Running phase space analysis...")
+        try:
+            from .detection.phase_space_gpu import (
+                PhaseSpaceAnalyzerGPU,
+            )
+
+            ps_analyzer = PhaseSpaceAnalyzerGPU(force_cpu=True)
+            result.phase_space_analysis = ps_analyzer.analyze_phase_space(
+                result.lambda_structures,
+            )
+
+            if config.verbose:
+                if "integrated_anomaly_score" in result.phase_space_analysis:
+                    score = result.phase_space_analysis["integrated_anomaly_score"]
+                    if hasattr(score, "__len__"):
+                        threshold = np.mean(score) + 2 * np.std(score)
+                        n_ps_anom = int(np.sum(score > threshold))
+                        print(f"         Phase space anomalies: {n_ps_anom} detected")
+                    else:
+                        print(f"         Phase space score: {score:.4f}")
+                else:
+                    print("         Phase space: computed")
+        except Exception as e:
+            logger.warning(f"Phase space analysis failed: {e}")
+
+    # ── 6. Network ──
     if config.enable_network:
         if config.verbose:
-            print("  [3/5] Analyzing causal network...")
+            print("  [4] Analyzing causal network...")
 
         analyzer = NetworkAnalyzerCore(
             sync_threshold=config.sync_threshold,
             causal_threshold=config.causal_threshold,
             max_lag=config.max_lag,
+            adaptive=config.adaptive_network,
         )
         result.network = analyzer.analyze(
             dataset.state_vectors,
@@ -244,18 +335,27 @@ def run(
 
         if config.verbose:
             print(f"         Pattern: {result.network.pattern}")
-            print(f"         Sync: {result.network.n_sync_links}, "
-                  f"Causal: {result.network.n_causal_links}")
+            print(
+                f"         Sync: {result.network.n_sync_links}, "
+                f"Causal: {result.network.n_causal_links}"
+            )
+            if config.adaptive_network and result.network.adaptive_params:
+                ap = result.network.adaptive_params
+                print(
+                    f"         Adaptive: sync>{ap['sync_threshold']:.3f}, "
+                    f"causal>{ap['causal_threshold']:.3f}, "
+                    f"max_lag={ap['max_lag']}"
+                )
 
-    # ── 5. Confidence ──
+    # ── 7. Confidence ──
     if config.enable_confidence:
         if config.verbose:
-            print(f"  [4/5] Assessing confidence (perm={config.n_permutations})...")
+            print(f"  [5] Assessing confidence (perm={config.n_permutations})...")
 
         result.confidence = assess_confidence(
             state_vectors=dataset.state_vectors,
             lambda_structures=result.lambda_structures,
-            structural_boundaries=result.structural_boundaries or None,
+            structural_boundaries=(result.structural_boundaries or None),
             anomaly_scores=result.anomaly_scores or None,
             network_result=result.network,
             dimension_names=dataset.dimension_names,
@@ -267,14 +367,16 @@ def run(
         )
 
         if config.verbose:
-            print(f"         Sig boundaries: {result.confidence.n_significant_boundaries}")
+            print(
+                f"         Sig boundaries: {result.confidence.n_significant_boundaries}"
+            )
             print(f"         Sig causal: {result.confidence.n_significant_causal}")
             print(f"         Sig sync: {result.confidence.n_significant_sync}")
 
-    # ── 6. Report ──
+    # ── 8. Report ──
     if config.enable_report:
         if config.verbose:
-            print("  [5/5] Generating report...")
+            print("  [6] Generating report...")
 
         from .analysis.report_generator import generate_report
 
@@ -303,6 +405,7 @@ def run(
 # CLI
 # ============================================================
 
+
 def main():
     import argparse
 
@@ -313,13 +416,55 @@ def main():
     parser.add_argument("source", help="Input file path (csv/json/parquet/npy)")
     parser.add_argument("--target", help="Target column name")
     parser.add_argument("--time", help="Time column name")
-    parser.add_argument("--normalize", default="range", choices=["range", "zscore", "none"])
-    parser.add_argument("--window", type=int, default=24, help="Window steps for Λ³")
-    parser.add_argument("--max-lag", type=int, default=12, help="Max lag for causal detection")
-    parser.add_argument("--n-perm", type=int, default=1000, help="Permutation count")
+    parser.add_argument(
+        "--normalize",
+        default="range",
+        choices=["range", "zscore", "none"],
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=24,
+        help="Window steps for Λ³",
+    )
+    parser.add_argument(
+        "--max-lag",
+        type=int,
+        default=12,
+        help="Max lag for causal detection",
+    )
+    parser.add_argument(
+        "--n-perm",
+        type=int,
+        default=1000,
+        help="Permutation count",
+    )
     parser.add_argument("--report", help="Output report path (.md)")
-    parser.add_argument("--no-confidence", action="store_true", help="Skip confidence assessment")
-    parser.add_argument("--no-network", action="store_true", help="Skip network analysis")
+    parser.add_argument(
+        "--no-confidence",
+        action="store_true",
+        help="Skip confidence assessment",
+    )
+    parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="Skip network analysis",
+    )
+    parser.add_argument(
+        "--no-extended",
+        action="store_true",
+        help="Skip extended detection",
+    )
+    parser.add_argument(
+        "--no-phase-space",
+        action="store_true",
+        help="Skip phase space analysis",
+    )
+    parser.add_argument(
+        "--no-adaptive",
+        action="store_true",
+        help="Disable adaptive network thresholds",
+    )
 
     args = parser.parse_args()
 
@@ -330,6 +475,9 @@ def main():
         report_path=args.report,
         enable_confidence=not args.no_confidence,
         enable_network=not args.no_network,
+        enable_extended=not args.no_extended,
+        enable_phase_space=not args.no_phase_space,
+        adaptive_network=not args.no_adaptive,
     )
 
     result = run(
