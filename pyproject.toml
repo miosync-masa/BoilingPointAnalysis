@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "getter-one"
-version = "0.1.8"
+version = "0.1.9"
 description = "GETTER One: Geometric Event-driven Tensor-based Time-series Extraction & Recognition - Structural event detection and causal network extraction for N-dimensional time series"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "MIT"}
