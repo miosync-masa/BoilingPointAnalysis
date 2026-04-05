@@ -59,6 +59,8 @@ class PipelineV2Config:
     causal_threshold: float = 0.25
     max_lag: int = 12
     adaptive_network: bool = True
+    use_local_std_for_network: bool = True  # Local std で無次元化
+    use_event_mask_for_network: bool = True  # Detection結果でフィルタ
 
     # Cascade
     enable_cascade: bool = True
@@ -312,10 +314,16 @@ def run_v2(
             f"({100 * n_events / n_frames:.1f}%)"
         )
 
-    # ── 4. Network (local_std + event_mask) ──
+    # ── 4. Network ──
     if config.enable_network:
         if config.verbose:
-            print("  [3] Network (dimensionless + event-filtered)...")
+            modes = []
+            if config.use_local_std_for_network:
+                modes.append("dimensionless")
+            if config.use_event_mask_for_network:
+                modes.append("event-filtered")
+            mode_str = " + ".join(modes) if modes else "raw"
+            print(f"  [3] Network ({mode_str})...")
 
         analyzer = NetworkAnalyzerCore(
             sync_threshold=config.sync_threshold,
@@ -323,11 +331,20 @@ def run_v2(
             max_lag=config.max_lag,
             adaptive=config.adaptive_network,
         )
+
+        # フラグに応じてNetworkへの渡し方を切り替え
+        net_local_lambda = (
+            result.local_lambda if config.use_local_std_for_network else None
+        )
+        net_event_mask = (
+            result.event_mask if config.use_event_mask_for_network else None
+        )
+
         result.network = analyzer.analyze(
             dataset.state_vectors,
             dimension_names=dataset.dimension_names,
-            local_lambda=result.local_lambda,
-            event_mask=result.event_mask,
+            local_lambda=net_local_lambda,
+            event_mask=net_event_mask,
         )
 
         if config.verbose:
