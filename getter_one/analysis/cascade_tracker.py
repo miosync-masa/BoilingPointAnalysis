@@ -18,6 +18,7 @@ logger = logging.getLogger("getter_one.analysis.cascade_tracker")
 # Data Classes
 # ============================================================
 
+
 @dataclass
 class CascadeEvent:
     """
@@ -25,14 +26,15 @@ class CascadeEvent:
 
     MD版の genesis_atoms + first_wave_atoms に相当。
     """
+
     event_id: int
-    frame: int                                    # イベント発生フレーム
-    delta_lambda_c: float                         # ΔΛC 強度
+    frame: int  # イベント発生フレーム
+    delta_lambda_c: float  # ΔΛC 強度
 
     # 起源と伝播
-    genesis_dims: list[int] = field(default_factory=list)    # 最初に動いた次元
-    affected_dims: list[int] = field(default_factory=list)   # 影響を受けた全次元
-    wave_dims: list[int] = field(default_factory=list)       # genesis以外で反応した次元
+    genesis_dims: list[int] = field(default_factory=list)  # 最初に動いた次元
+    affected_dims: list[int] = field(default_factory=list)  # 影響を受けた全次元
+    wave_dims: list[int] = field(default_factory=list)  # genesis以外で反応した次元
 
     # 名前付き
     genesis_names: list[str] = field(default_factory=list)
@@ -44,7 +46,7 @@ class CascadeEvent:
     threshold_used: float = 0.0
 
     # ネットワーク特性
-    hub_dims: list[int] = field(default_factory=list)        # ハブ次元
+    hub_dims: list[int] = field(default_factory=list)  # ハブ次元
     propagation_order: list[int] = field(default_factory=list)  # 伝播順序
 
 
@@ -56,19 +58,20 @@ class CascadeLink:
     MD版の residue_bridge に相当するが、
     次元間の因果伝播を時間軸でつなぐ。
     """
+
     from_event_id: int
     to_event_id: int
     from_frame: int
     to_frame: int
-    frame_gap: int                                # フレーム間隔
+    frame_gap: int  # フレーム間隔
 
     # 因果の証拠
     shared_dims: list[int] = field(default_factory=list)  # 共有次元
     shared_names: list[str] = field(default_factory=list)
-    causality_score: float = 0.0                  # 因果スコア
+    causality_score: float = 0.0  # 因果スコア
 
     # リンクタイプ
-    link_type: str = "sequential"                 # sequential / branching / merging
+    link_type: str = "sequential"  # sequential / branching / merging
 
 
 @dataclass
@@ -79,15 +82,16 @@ class CascadeChain:
     MD版では閉じた系で1本のchainだったが、
     汎用版では分岐・合流も許容する。
     """
+
     chain_id: int
     event_ids: list[int] = field(default_factory=list)
     links: list[CascadeLink] = field(default_factory=list)
 
     # チェーン特性
-    length: int = 0                               # チェーン長
-    total_frames: int = 0                         # 全体のフレーム幅
-    origin_dims: list[int] = field(default_factory=list)     # 最初のgenesisの次元
-    terminal_dims: list[int] = field(default_factory=list)   # 最後のaffectedの次元
+    length: int = 0  # チェーン長
+    total_frames: int = 0  # 全体のフレーム幅
+    origin_dims: list[int] = field(default_factory=list)  # 最初のgenesisの次元
+    terminal_dims: list[int] = field(default_factory=list)  # 最後のaffectedの次元
     origin_names: list[str] = field(default_factory=list)
     terminal_names: list[str] = field(default_factory=list)
 
@@ -103,6 +107,7 @@ class CascadeResult:
 
     MD版の ThirdImpactResult の汎用版。
     """
+
     # イベント
     events: list[CascadeEvent] = field(default_factory=list)
     n_events: int = 0
@@ -124,9 +129,9 @@ class CascadeResult:
     critical_names: list[str] = field(default_factory=list)
 
     # グローバル統計
-    cascade_coverage: float = 0.0       # 全フレームに対するカスケードの時間的カバー率
+    cascade_coverage: float = 0.0  # 全フレームに対するカスケードの時間的カバー率
     mean_chain_length: float = 0.0
-    branching_ratio: float = 0.0        # 分岐率（1イベントから複数への発火）
+    branching_ratio: float = 0.0  # 分岐率（1イベントから複数への発火）
 
     # 次元名
     dimension_names: list[str] = field(default_factory=list)
@@ -135,6 +140,7 @@ class CascadeResult:
 # ============================================================
 # Cascade Tracker
 # ============================================================
+
 
 class CascadeTracker:
     """
@@ -246,7 +252,9 @@ class CascadeTracker:
             triu = corr_matrix[np.triu_indices(n_dims, k=1)]
             # NaN除去
             triu = triu[~np.isnan(triu)]
-            correlation_complexity = 1.0 - np.mean(np.abs(triu)) if len(triu) > 0 else 0.5
+            correlation_complexity = (
+                1.0 - np.mean(np.abs(triu)) if len(triu) > 0 else 0.5
+            )
         else:
             correlation_complexity = 0.5
 
@@ -254,13 +262,12 @@ class CascadeTracker:
         base_window = max(10, n_frames // 10)
         local_volatilities = []
         for i in range(0, n_frames - base_window, max(1, base_window // 2)):
-            window_data = state_vectors[i:i + base_window]
+            window_data = state_vectors[i : i + base_window]
             local_volatilities.append(np.std(window_data))
 
         if len(local_volatilities) > 1:
-            volatility_variation = (
-                np.std(local_volatilities)
-                / (np.mean(local_volatilities) + 1e-10)
+            volatility_variation = np.std(local_volatilities) / (
+                np.mean(local_volatilities) + 1e-10
             )
         else:
             volatility_variation = 0.5
@@ -269,9 +276,8 @@ class CascadeTracker:
         fft_mag = np.abs(np.fft.fft(state_vectors, axis=0))
         low_cutoff = max(1, n_frames // 10)
         high_cutoff = max(2, n_frames // 2)
-        low_freq_ratio = (
-            np.sum(fft_mag[:low_cutoff])
-            / (np.sum(fft_mag[:high_cutoff]) + 1e-10)
+        low_freq_ratio = np.sum(fft_mag[:low_cutoff]) / (
+            np.sum(fft_mag[:high_cutoff]) + 1e-10
         )
 
         # ── scale_factor の計算 ──
@@ -383,6 +389,7 @@ class CascadeTracker:
         lambda_structures: dict[str, np.ndarray],
         dimension_names: list[str] | None = None,
         dimension_groups: dict[str, list[int]] | None = None,
+        local_lambda: dict | None = None,
     ) -> CascadeResult:
         """
         カスケード因果チェーンを追跡
@@ -392,12 +399,17 @@ class CascadeTracker:
         state_vectors : np.ndarray (n_frames, n_dims)
             N次元状態ベクトル時系列
         lambda_structures : dict[str, np.ndarray]
-            LambdaStructuresCore の出力
+            LambdaStructuresCore の出力（Global Lambda）
         dimension_names : list[str], optional
             各次元の名前
         dimension_groups : dict[str, list[int]], optional
             次元グループ定義（残基の代替）
             例: {"weather": [0,1,2], "ocean": [3,4,5]}
+        local_lambda : dict, optional
+            LambdaStructuresDualCore の Local (方式A) 出力。
+            渡された場合、genesis/affected判定を無次元化済みの
+            local_lambda_F で行い、スケール不変な因果追跡を実現する。
+            期待されるキー: "local_lambda_F", "local_std"
 
         Returns
         -------
@@ -408,15 +420,11 @@ class CascadeTracker:
         if dimension_names is None:
             dimension_names = [f"dim_{i}" for i in range(n_dims)]
 
-        logger.info(
-            f"🔺 CascadeTracker: {n_dims} dims × {n_frames} frames"
-        )
+        logger.info(f"🔺 CascadeTracker: {n_dims} dims × {n_frames} frames")
 
         # ── Step 0: 適応的パラメータ計算 ──
         if self.adaptive:
-            self.adaptive_params = self._compute_adaptive_parameters(
-                state_vectors
-            )
+            self.adaptive_params = self._compute_adaptive_parameters(state_vectors)
             # 実行時パラメータを更新
             self.sigma_threshold = self.adaptive_params["sigma_threshold"]
             self.max_gap = self.adaptive_params["max_gap"]
@@ -432,7 +440,7 @@ class CascadeTracker:
 
         # ── Step 1: ΔΛC イベント検出 ──
         events = self._detect_events(
-            state_vectors, lambda_structures, dimension_names
+            state_vectors, lambda_structures, dimension_names, local_lambda
         )
         logger.info(f"   Events detected: {len(events)}")
 
@@ -456,9 +464,7 @@ class CascadeTracker:
         logger.info(f"   Cascade chains: {len(chains)}")
 
         # ── Step 5: クリティカル次元特定 ──
-        critical_dims = self._identify_critical_dims(
-            events, links, chains, n_dims
-        )
+        critical_dims = self._identify_critical_dims(events, links, chains, n_dims)
 
         # ── 結果構築 ──
         result = CascadeResult(
@@ -490,6 +496,7 @@ class CascadeTracker:
         state_vectors: np.ndarray,
         lambda_structures: dict[str, np.ndarray],
         dimension_names: list[str],
+        local_lambda: dict | None = None,
     ) -> list[CascadeEvent]:
         """
         ΔΛCイベントの検出（適応的ウィンドウ版）
@@ -541,12 +548,12 @@ class CascadeTracker:
 
         # ピーク検出（局所最大のみ、最小距離フィルタ付き）
         event_frames = self._detect_peaks_adaptive(
-            delta_lambda_c, above_indices, min_distance=3,
+            delta_lambda_c,
+            above_indices,
+            min_distance=3,
         )
 
-        logger.info(
-            f"   ΔΛC adaptive window: {adaptive_window} frames"
-        )
+        logger.info(f"   ΔΛC adaptive window: {adaptive_window} frames")
         logger.info(
             f"   ΔΛC global ref: threshold={global_threshold:.4f} "
             f"(μ={global_mean:.4f}, σ={global_std:.4f})"
@@ -565,6 +572,7 @@ class CascadeTracker:
                 lambda_structures=lambda_structures,
                 delta_lambda_c_value=float(delta_lambda_c[frame]),
                 dimension_names=dimension_names,
+                local_lambda=local_lambda,
             )
             events.append(event)
 
@@ -696,17 +704,18 @@ class CascadeTracker:
         lambda_structures: dict[str, np.ndarray],
         delta_lambda_c_value: float,
         dimension_names: list[str],
+        local_lambda: dict | None = None,
     ) -> CascadeEvent:
         """
         単一イベントの解析
 
-        Third Impact の _analyze_instantaneous_event + 伝播追跡の汎用版。
-        各次元の変位 z-score から genesis/affected を特定する。
+        local_lambda が渡された場合:
+          local_lambda_F の非ゼロ次元 = ジャンプ検出済み = genesis
+          → スケール不変（無次元化済み）
+          → "Globalが壊れたのはどのLocalの連鎖からか" を追跡
 
-        ΔΛC検出フレームと実際の変位フレームにはオフセットが生じうる
-        （lambda_F_mag が diff 演算ベースのため）。
-        そのためイベントフレーム周辺 (±scan_radius) を探索して
-        最大変位のフレームを真のイベントフレームとする。
+        local_lambda が無い場合:
+          従来の z-score ベース（後方互換）
         """
         n_frames, n_dims = state_vectors.shape
         scan_radius = 2
@@ -720,80 +729,110 @@ class CascadeTracker:
         if frame < 1:
             return event
 
-        # ── ベースライン統計: ルックバックウィンドウの「通常の変動」──
-        baseline_start = max(0, frame - self.lookback - scan_radius)
-        baseline_end = max(baseline_start + 2, frame - scan_radius)
-        baseline_window = state_vectors[baseline_start:baseline_end]
+        # ============================================================
+        # local_lambda (方式A) がある場合: 無次元化済みのΛFで判定
+        # ============================================================
+        if local_lambda is not None and "local_lambda_F" in local_lambda:
+            local_lf = local_lambda["local_lambda_F"]  # (n_frames-1, n_dims)
+            n_diff = len(local_lf)
 
-        if len(baseline_window) < 3:
-            # フォールバック: 全データから統計
-            all_disp = np.abs(np.diff(state_vectors, axis=0))
-            baseline_mean = np.mean(all_disp, axis=0)
-            baseline_std = np.std(all_disp, axis=0)
+            # ΔΛC検出フレーム周辺を探索
+            scan_start = max(0, frame - 1 - scan_radius)
+            scan_end = min(n_diff, frame - 1 + scan_radius + 1)
+
+            # genesis: 周辺でlocal_lambda_Fが非ゼロ（=ジャンプ検出済み）の次元
+            for d in range(n_dims):
+                if np.any(local_lf[scan_start:scan_end, d] != 0):
+                    event.genesis_dims.append(d)
+
+            # 伝播追跡: 後続フレームでlocal_lambda_Fが非ゼロになる次元
+            max_propagation = min(3, n_diff - frame)
+            all_affected = set(event.genesis_dims)
+
+            for delta in range(1, max_propagation + 1):
+                future_idx = frame - 1 + scan_radius + delta
+                if future_idx >= n_diff:
+                    break
+                for d in range(n_dims):
+                    if local_lf[future_idx, d] != 0 and d not in all_affected:
+                        event.wave_dims.append(d)
+                        all_affected.add(d)
+
+            event.affected_dims = sorted(all_affected)
+
+            # レポート用統計（local_stdベース）
+            if "local_std" in local_lambda:
+                local_std = local_lambda["local_std"]
+                event.mean_displacement = float(np.mean(local_std[frame]))
+                event.std_displacement = float(np.std(local_std[frame]))
+            event.threshold_used = 0.0  # ΛFベースなので閾値はDualCore側で適用済み
+
+        # ============================================================
+        # 従来方式: 生データの z-score で判定（後方互換）
+        # ============================================================
         else:
-            baseline_disp = np.abs(np.diff(baseline_window, axis=0))
-            baseline_mean = np.mean(baseline_disp, axis=0)  # (n_dims,)
-            baseline_std = np.std(baseline_disp, axis=0)    # (n_dims,)
+            baseline_start = max(0, frame - self.lookback - scan_radius)
+            baseline_end = max(baseline_start + 2, frame - scan_radius)
+            baseline_window = state_vectors[baseline_start:baseline_end]
 
-        # ── Genesis 検出: フレーム周辺を探索 ──
-        scan_start = max(1, frame - scan_radius)
-        scan_end = min(n_frames - 1, frame + scan_radius + 1)
+            if len(baseline_window) < 3:
+                all_disp = np.abs(np.diff(state_vectors, axis=0))
+                baseline_mean = np.mean(all_disp, axis=0)
+                baseline_std = np.std(all_disp, axis=0)
+            else:
+                baseline_disp = np.abs(np.diff(baseline_window, axis=0))
+                baseline_mean = np.mean(baseline_disp, axis=0)
+                baseline_std = np.std(baseline_disp, axis=0)
 
-        best_z_scores = np.zeros(n_dims)
+            scan_start = max(1, frame - scan_radius)
+            scan_end = min(n_frames - 1, frame + scan_radius + 1)
+            best_z_scores = np.zeros(n_dims)
 
-        for f in range(scan_start, scan_end):
-            frame_disp = np.abs(state_vectors[f] - state_vectors[f - 1])
-            z_scores = (frame_disp - baseline_mean) / (baseline_std + 1e-10)
+            for f in range(scan_start, scan_end):
+                frame_disp = np.abs(state_vectors[f] - state_vectors[f - 1])
+                z_scores = (frame_disp - baseline_mean) / (baseline_std + 1e-10)
+                best_z_scores = np.maximum(best_z_scores, z_scores)
 
-            # 各次元で最大 z-score を保持
-            best_z_scores = np.maximum(best_z_scores, z_scores)
-
-        # 全次元の変位統計（レポート用）
-        event.mean_displacement = float(np.mean(baseline_mean))
-        event.std_displacement = float(np.mean(baseline_std))
-        event.threshold_used = float(
-            event.mean_displacement
-            + self.sigma_threshold * event.std_displacement
-        )
-
-        # genesis dims: 周辺探索での最大 z-score が閾値超過
-        for d in range(n_dims):
-            if best_z_scores[d] > self.sigma_threshold:
-                event.genesis_dims.append(d)
-
-        # ── 伝播追跡: 後続フレームの波動 ──
-        max_propagation = min(3, n_frames - frame - 1)
-        all_affected = set(event.genesis_dims)
-
-        for delta in range(1, max_propagation + 1):
-            future_frame = frame + scan_radius + delta
-            if future_frame >= n_frames:
-                break
-
-            future_disp = np.abs(
-                state_vectors[future_frame] - state_vectors[future_frame - 1]
+            event.mean_displacement = float(np.mean(baseline_mean))
+            event.std_displacement = float(np.mean(baseline_std))
+            event.threshold_used = float(
+                event.mean_displacement + self.sigma_threshold * event.std_displacement
             )
-            future_z = (future_disp - baseline_mean) / (baseline_std + 1e-10)
 
             for d in range(n_dims):
-                if future_z[d] > self.sigma_threshold and d not in all_affected:
-                    event.wave_dims.append(d)
-                    all_affected.add(d)
+                if best_z_scores[d] > self.sigma_threshold:
+                    event.genesis_dims.append(d)
 
-        event.affected_dims = sorted(all_affected)
+            max_propagation = min(3, n_frames - frame - 1)
+            all_affected = set(event.genesis_dims)
 
-        # ── 名前付け ──
+            for delta in range(1, max_propagation + 1):
+                future_frame = frame + scan_radius + delta
+                if future_frame >= n_frames:
+                    break
+                future_disp = np.abs(
+                    state_vectors[future_frame] - state_vectors[future_frame - 1]
+                )
+                future_z = (future_disp - baseline_mean) / (baseline_std + 1e-10)
+                for d in range(n_dims):
+                    if future_z[d] > self.sigma_threshold and d not in all_affected:
+                        event.wave_dims.append(d)
+                        all_affected.add(d)
+
+            event.affected_dims = sorted(all_affected)
+
+        # ── 共通: 名前付け ──
         event.genesis_names = [dimension_names[d] for d in event.genesis_dims]
         event.affected_names = [dimension_names[d] for d in event.affected_dims]
 
         # ── 伝播順序の推定 ──
         event.propagation_order = self._estimate_propagation_order(
-            state_vectors, frame, n_dims
+            state_vectors, frame, n_dims, local_lambda
         )
 
         # ── ハブ次元の検出 ──
         event.hub_dims = self._detect_event_hubs(
-            state_vectors, frame, event.affected_dims
+            state_vectors, frame, event.affected_dims, local_lambda
         )
 
         return event
@@ -803,15 +842,34 @@ class CascadeTracker:
         state_vectors: np.ndarray,
         event_frame: int,
         n_dims: int,
+        local_lambda: dict | None = None,
     ) -> list[int]:
         """
         伝播順序の推定
 
-        NetworkAnalyzerCore._estimate_propagation_order と同等ロジック。
-        各次元が閾値を超えた最初のフレームで順序付け。
+        local_lambda がある場合: local_lambda_F の非ゼロフレームの
+        時間的順序で伝播順序を決定（無次元化済み）。
         """
+        # local_lambda がある場合: ΛFの発火タイミングで順序付け
+        if local_lambda is not None and "local_lambda_F" in local_lambda:
+            local_lf = local_lambda["local_lambda_F"]
+            n_diff = len(local_lf)
+            start_idx = max(0, event_frame - 1 - self.lookback)
+            end_idx = min(n_diff, event_frame - 1 + 1)
+
+            onset_frames = np.full(n_dims, end_idx - start_idx)
+            window = local_lf[start_idx:end_idx]
+
+            for d in range(n_dims):
+                nonzero = np.where(window[:, d] != 0)[0]
+                if len(nonzero) > 0:
+                    onset_frames[d] = nonzero[0]
+
+            return list(np.argsort(onset_frames))
+
+        # フォールバック: 従来方式
         start = max(0, event_frame - self.lookback)
-        window = state_vectors[start:event_frame + 1]
+        window = state_vectors[start : event_frame + 1]
 
         if len(window) < 3:
             return list(range(n_dims))
@@ -834,20 +892,26 @@ class CascadeTracker:
         state_vectors: np.ndarray,
         event_frame: int,
         affected_dims: list[int],
+        local_lambda: dict | None = None,
     ) -> list[int]:
         """
         イベント時のハブ次元検出
 
-        affected_dims の中で、他の次元との相関が高い次元をハブとする。
+        local_lambda がある場合: local_std で無次元化した相関を使用。
         """
         if len(affected_dims) < 3:
             return list(affected_dims)
 
         start = max(0, event_frame - self.lookback)
-        window = state_vectors[start:event_frame + 1, :]
+        window = state_vectors[start : event_frame + 1, :]
 
         if len(window) < 3:
             return []
+
+        # 無次元化（local_lambda がある場合）
+        if local_lambda is not None and "local_std" in local_lambda:
+            local_std = local_lambda["local_std"][start : event_frame + 1, :]
+            window = window / (local_std + 1e-10)
 
         # affected_dims 内のペアワイズ相関
         connectivity = np.zeros(len(affected_dims))
@@ -863,7 +927,6 @@ class CascadeTracker:
         if np.max(connectivity) == 0:
             return []
 
-        # 上位をハブとする
         hub_threshold = np.mean(connectivity) + np.std(connectivity)
         hubs = [
             affected_dims[i]
@@ -871,9 +934,9 @@ class CascadeTracker:
             if connectivity[i] > hub_threshold
         ]
 
-        return sorted(hubs, key=lambda d: connectivity[
-            affected_dims.index(d)
-        ], reverse=True)
+        return sorted(
+            hubs, key=lambda d: connectivity[affected_dims.index(d)], reverse=True
+        )
 
     # ================================================================
     # Step 2: イベント間因果リンク判定
@@ -928,19 +991,23 @@ class CascadeTracker:
 
                 # リンクタイプ判定
                 n_outgoing_i = sum(
-                    1 for k in range(i + 1, len(sorted_events))
+                    1
+                    for k in range(i + 1, len(sorted_events))
                     if sorted_events[k].frame - event_i.frame <= self.max_gap
-                    and len(set(event_i.affected_dims)
-                            & set(sorted_events[k].genesis_dims))
-                        >= self.min_shared_dims
+                    and len(
+                        set(event_i.affected_dims) & set(sorted_events[k].genesis_dims)
+                    )
+                    >= self.min_shared_dims
                 )
 
                 n_incoming_j = sum(
-                    1 for k in range(j)
+                    1
+                    for k in range(j)
                     if event_j.frame - sorted_events[k].frame <= self.max_gap
-                    and len(set(sorted_events[k].affected_dims)
-                            & set(event_j.genesis_dims))
-                        >= self.min_shared_dims
+                    and len(
+                        set(sorted_events[k].affected_dims) & set(event_j.genesis_dims)
+                    )
+                    >= self.min_shared_dims
                 )
 
                 if n_outgoing_i > 1:
@@ -1007,10 +1074,7 @@ class CascadeTracker:
         event_map = {e.event_id: e for e in events}
 
         # link のマッピング (from, to) → link
-        link_map = {
-            (lnk.from_event_id, lnk.to_event_id): lnk
-            for lnk in links
-        }
+        link_map = {(lnk.from_event_id, lnk.to_event_id): lnk for lnk in links}
 
         # ── DAG枝刈り: 各ノードから上位 max_children 本のみ ──
         max_children = 3
@@ -1044,7 +1108,8 @@ class CascadeTracker:
 
         for root in roots:
             paths = self._dfs_all_paths(
-                root, pruned_dag,
+                root,
+                pruned_dag,
                 max_depth=15,
                 max_paths=max_paths - len(chains),
             )
@@ -1071,22 +1136,19 @@ class CascadeTracker:
                     event_ids=path,
                     links=chain_links,
                     length=len(path),
-                    total_frames=(
-                        terminal_event.frame - origin_event.frame
-                    ),
+                    total_frames=(terminal_event.frame - origin_event.frame),
                     origin_dims=origin_event.genesis_dims,
                     terminal_dims=terminal_event.affected_dims,
                     origin_names=[
-                        dimension_names[d]
-                        for d in origin_event.genesis_dims
+                        dimension_names[d] for d in origin_event.genesis_dims
                     ],
                     terminal_names=[
-                        dimension_names[d]
-                        for d in terminal_event.affected_dims
+                        dimension_names[d] for d in terminal_event.affected_dims
                     ],
                     mean_causality=(
                         np.mean([lnk.causality_score for lnk in chain_links])
-                        if chain_links else 0.0
+                        if chain_links
+                        else 0.0
                     ),
                     total_delta_lambda_c=sum(
                         event_map[eid].delta_lambda_c for eid in path
@@ -1108,7 +1170,7 @@ class CascadeTracker:
         chains = [c for c in chains if c.mean_causality >= self.min_causality]
 
         # max_chains で上位のみ保持
-        chains = chains[:self.max_chains]
+        chains = chains[: self.max_chains]
 
         return chains
 
@@ -1211,9 +1273,7 @@ class CascadeTracker:
     ):
         """グローバル統計を計算"""
         if result.n_chains > 0:
-            result.mean_chain_length = np.mean(
-                [c.length for c in result.chains]
-            )
+            result.mean_chain_length = np.mean([c.length for c in result.chains])
 
             # カスケードの時間的カバー率
             covered_frames = set()
@@ -1225,9 +1285,7 @@ class CascadeTracker:
             branching_links = sum(
                 1 for lnk in result.links if lnk.link_type == "branching"
             )
-            result.branching_ratio = (
-                branching_links / max(result.n_links, 1)
-            )
+            result.branching_ratio = branching_links / max(result.n_links, 1)
 
     # ================================================================
     # Output
@@ -1247,9 +1305,7 @@ class CascadeTracker:
         logger.info(f"  Coverage: {result.cascade_coverage:.1%}")
 
         if result.critical_names:
-            logger.info(
-                f"  Critical dims: {', '.join(result.critical_names[:5])}"
-            )
+            logger.info(f"  Critical dims: {', '.join(result.critical_names[:5])}")
 
         # トップチェーンの詳細
         for chain in result.chains[:3]:
@@ -1262,9 +1318,5 @@ class CascadeTracker:
                 f"Frames: {chain.total_frames}, "
                 f"Causality: {chain.mean_causality:.3f}"
             )
-            logger.info(
-                f"    Origin: {', '.join(chain.origin_names[:3])}"
-            )
-            logger.info(
-                f"    Terminal: {', '.join(chain.terminal_names[:3])}"
-            )
+            logger.info(f"    Origin: {', '.join(chain.origin_names[:3])}")
+            logger.info(f"    Terminal: {', '.join(chain.terminal_names[:3])}")
