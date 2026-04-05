@@ -1,18 +1,7 @@
 """
 Inverse Checker — Structural Verification for Cascade Events
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-CascadeTrackerが検出したイベントを逆問題で構造的に検証するよ！🔥
-
-検出（System 1）と検証（System 2）の分離により：
-- 閾値ガン下げ → Recall ≈ 100%
-- inverse_checker → Precision ↑
-- Pareto frontの外側へ 🏆
-
 ⚠️ GPU ONLY — pip install getter-one[gpu]
-
-by 環ちゃん
-
 Built with 💕 by Masamichi & Tamaki
 """
 
@@ -45,16 +34,26 @@ class EventVerdict:
     delta_lambda_c: float
 
     # 3軸スコア
-    reconstruction_error: float = 0.0  # 低い = 構造的に説明可能
+    reconstruction_error: float = 0.0  # 低い = 系の構造で説明可能
     topo_score: float = 0.0  # 低い = 位相整合的
     jump_score: float = 0.0  # 高い = 構造的に有意なジャンプ
 
     # 統合
-    hybrid_score: float = 0.0  # 高い = 構造的イベント
-    is_structural: bool = False  # True = 本物, False = ノイズ
+    hybrid_score: float = 0.0  # 正 = NORMAL（壊れてない）, 負 = CRITICAL（壊れた）
+    is_normal: bool = True  # True = 系は健全, False = 系が壊れた（不可逆的構造変化）
 
     # 名前付き情報（cascade_trackerから引き継ぎ）
     genesis_names: list[str] = field(default_factory=list)
+
+    @property
+    def is_critical(self) -> bool:
+        """系が壊れたか（不可逆的構造変化）"""
+        return not self.is_normal
+
+    @property
+    def verdict_label(self) -> str:
+        """判定ラベル"""
+        return "NORMAL" if self.is_normal else "CRITICAL"
 
     @property
     def confidence_label(self) -> str:
@@ -80,9 +79,9 @@ class VerificationResult:
 
     # 統計
     n_total: int = 0
-    n_structural: int = 0
-    n_noise: int = 0
-    structural_ratio: float = 0.0
+    n_normal: int = 0
+    n_critical: int = 0
+    normal_ratio: float = 0.0
 
     # 生スコア配列（npyで保存用）
     raw_reconstruction_errors: np.ndarray | None = None
@@ -90,13 +89,35 @@ class VerificationResult:
     raw_jump_scores: np.ndarray | None = None
     raw_hybrid_scores: np.ndarray | None = None
 
+    # === 後方互換性エイリアス ===
+    @property
+    def n_structural(self) -> int:
+        return self.n_normal
+
+    @property
+    def n_noise(self) -> int:
+        return self.n_critical
+
+    @property
+    def structural_ratio(self) -> float:
+        return self.normal_ratio
+
     def structural_events(self) -> list[EventVerdict]:
-        """構造的イベントのみ返す"""
-        return [v for v in self.verdicts if v.is_structural]
+        """後方互換: normal_events() のエイリアス"""
+        return self.normal_events()
 
     def noise_events(self) -> list[EventVerdict]:
-        """ノイズ判定イベントのみ返す"""
-        return [v for v in self.verdicts if not v.is_structural]
+        """後方互換: critical_events() のエイリアス"""
+        return self.critical_events()
+
+    # === 新API ===
+    def normal_events(self) -> list[EventVerdict]:
+        """NORMALイベント（系は壊れてない）"""
+        return [v for v in self.verdicts if v.is_normal]
+
+    def critical_events(self) -> list[EventVerdict]:
+        """CRITICALイベント（系が壊れた＝不可逆的構造変化）"""
+        return [v for v in self.verdicts if v.is_critical]
 
     def get_verdict(self, event_id: int) -> EventVerdict | None:
         """event_idで検索"""
@@ -285,16 +306,16 @@ class InverseChecker:
         CascadeResult
             フィルタ済みの結果
         """
-        # 構造的イベントのIDセット
-        structural_ids = {v.event_id for v in verification.verdicts if v.is_structural}
+        # NORMALイベント（壊れてない）のIDセット
+        normal_ids = {v.event_id for v in verification.verdicts if v.is_normal}
 
-        # チェーンのフィルタ: 起点が構造的なもののみ
+        # チェーンのフィルタ: 起点がNORMALなもののみ
         filtered_chains = []
         for chain in cascade_result.chains:
             if not chain.event_ids:
                 continue
             origin_id = chain.event_ids[0]
-            if origin_id in structural_ids:
+            if origin_id in normal_ids:
                 filtered_chains.append(chain)
 
         n_kept = len(filtered_chains)
@@ -419,20 +440,20 @@ class InverseChecker:
                 topo_score=float(raw["topo_scores"][i]),
                 jump_score=float(raw["jump_scores"][i]),
                 hybrid_score=hybrid,
-                is_structural=hybrid > self.verdict_threshold,
+                is_normal=hybrid > self.verdict_threshold,
                 genesis_names=event.genesis_names,
             )
             verdicts.append(verdict)
 
-        n_structural = sum(1 for v in verdicts if v.is_structural)
+        n_normal = sum(1 for v in verdicts if v.is_normal)
         n_total = len(verdicts)
 
         return VerificationResult(
             verdicts=verdicts,
             n_total=n_total,
-            n_structural=n_structural,
-            n_noise=n_total - n_structural,
-            structural_ratio=(n_structural / n_total if n_total > 0 else 0.0),
+            n_normal=n_normal,
+            n_critical=n_total - n_normal,
+            normal_ratio=(n_normal / n_total if n_total > 0 else 0.0),
             raw_reconstruction_errors=raw["reconstruction_errors"],
             raw_topo_scores=raw["topo_scores"],
             raw_jump_scores=raw["jump_scores"],
@@ -445,10 +466,8 @@ class InverseChecker:
         logger.info("🔺 Inverse Verification Summary")
         logger.info("=" * 50)
         logger.info(f"  Total events: {result.n_total}")
-        logger.info(
-            f"  Structural:   {result.n_structural} ({result.structural_ratio:.1%})"
-        )
-        logger.info(f"  Noise:        {result.n_noise}")
+        logger.info(f"  NORMAL:   {result.n_normal} ({result.normal_ratio:.1%})")
+        logger.info(f"  CRITICAL: {result.n_critical}")
 
         # 上位イベント
         if result.verdicts:
@@ -456,22 +475,22 @@ class InverseChecker:
                 result.verdicts, key=lambda v: v.hybrid_score, reverse=True
             )
             logger.info("")
-            logger.info("  Top structural events:")
+            logger.info("  Top NORMAL events (system intact):")
             for v in sorted_v[:5]:
-                status = "✅" if v.is_structural else "❌"
+                label = v.verdict_label
                 logger.info(
-                    f"    {status} E{v.event_id:>3} "
+                    f"    [{label}] E{v.event_id:>3} "
                     f"(frame={v.frame}) "
                     f"hybrid={v.hybrid_score:+.3f} "
                     f"[{v.confidence_label}]"
                 )
 
             logger.info("")
-            logger.info("  Bottom events (noise candidates):")
+            logger.info("  CRITICAL events (irreversible structural change):")
             for v in sorted_v[-3:]:
-                status = "✅" if v.is_structural else "❌"
+                label = v.verdict_label
                 logger.info(
-                    f"    {status} E{v.event_id:>3} "
+                    f"    [{label}] E{v.event_id:>3} "
                     f"(frame={v.frame}) "
                     f"hybrid={v.hybrid_score:+.3f} "
                     f"[{v.confidence_label}]"
