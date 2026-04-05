@@ -306,6 +306,8 @@ class NetworkAnalyzerCore:
         state_vectors: np.ndarray,
         dimension_names: list[str] | None = None,
         window: int | None = None,
+        local_lambda: dict | None = None,
+        event_mask: np.ndarray | None = None,
     ) -> NetworkResult:
         """
         全体ネットワーク解析
@@ -318,6 +320,14 @@ class NetworkAnalyzerCore:
             各次元の名前
         window : int, optional
             相関計算ウィンドウ（Noneなら全フレーム使用）
+        local_lambda : dict, optional
+            LambdaStructuresDualCore の Local (方式A) 出力。
+            渡された場合、displacement を local_std で無次元化して
+            スケール不変な偏相関を計算する。
+            期待されるキー: "local_std" (n_frames, n_dims)
+        event_mask : np.ndarray (n_frames,) bool, optional
+            Detection層のOR統合結果。True = 本物の構造変化。
+            渡された場合、構造変化フレームだけで偏相関を計算する。
 
         Returns
         -------
@@ -348,7 +358,9 @@ class NetworkAnalyzerCore:
         )
 
         # 1. 相関計算
-        correlations = self._compute_correlations(state_vectors, window)
+        correlations = self._compute_correlations(
+            state_vectors, window, local_lambda, event_mask
+        )
 
         # 2. ネットワーク構築
         sync_links, causal_links = self._build_networks(correlations, dimension_names)
@@ -436,12 +448,23 @@ class NetworkAnalyzerCore:
     # 相関計算
     # ================================================================
 
-    def _compute_correlations(self, state_vectors: np.ndarray, window: int) -> dict:
+    def _compute_correlations(
+        self,
+        state_vectors: np.ndarray,
+        window: int,
+        local_lambda: dict | None = None,
+        event_mask: np.ndarray | None = None,
+    ) -> dict:
         """
         全次元ペアの相関計算（同期・因果）
 
         n_dims >= 3 の場合は偏相関を使用し、交絡変数の影響を除去する。
         n_dims < 3 の場合はペアワイズ相関にフォールバック。
+
+        local_lambda が渡された場合、displacement を local_std で
+        無次元化してスケール不変な偏相関を計算する。
+
+        event_mask が渡された場合、構造変化フレームだけで偏相関を計算する。
         """
         n_frames, n_dims = state_vectors.shape
         w = min(window, n_frames)
@@ -452,7 +475,35 @@ class NetworkAnalyzerCore:
 
         # 変位ベクトル（1次差分）で相関を計算
         # 生データの相関だとトレンドに引きずられるため
-        displacement = np.diff(state_vectors[:w], axis=0)
+        raw_displacement = np.diff(state_vectors[:w], axis=0)
+
+        # Local Lambda (方式A) が渡された場合: 無次元化
+        if local_lambda is not None and "local_std" in local_lambda:
+            local_std = local_lambda["local_std"][:w]
+            local_std_diff = local_std[1:]  # diff と長さを合わせる
+            displacement = raw_displacement / (local_std_diff + 1e-10)
+            logger.info("   📐 Using dimensionless displacement (local_std normalized)")
+        else:
+            displacement = raw_displacement
+
+        # Detection結果 (event_mask) が渡された場合: 構造変化フレームだけに絞る
+        if event_mask is not None:
+            # event_mask[t]=True → フレームtで構造変化
+            # displacement[t-1] = state[t] - state[t-1] が対応
+            disp_mask = event_mask[1:w]
+            n_events = int(np.sum(disp_mask))
+            if n_events >= 3:
+                displacement = displacement[disp_mask]
+                logger.info(
+                    f"   🎯 Event mask applied: "
+                    f"{n_events}/{len(disp_mask)} frames "
+                    f"({100 * n_events / len(disp_mask):.1f}% = structural events)"
+                )
+            else:
+                logger.warning(
+                    f"   ⚠️ Event mask has only {n_events} events, "
+                    f"using all frames as fallback"
+                )
 
         use_partial = n_dims >= 3
 
