@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict
 
 import numpy as np
 
@@ -116,7 +115,7 @@ def compute_adaptive_window(
     state_vectors: np.ndarray,
     base_window: int = 30,
     min_window: int = 10,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """データ特性に基づく動的ウィンドウサイズ"""
     n_frames, n_dims = state_vectors.shape
     max_window = max(100, min(n_frames // 10, 2000))
