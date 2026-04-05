@@ -12,8 +12,9 @@ and causal network extraction for N-dimensional time series.
 
 Usage:
     from getter_one.data import load
-    from getter_one.structures import LambdaStructuresCore
+    from getter_one.structures import LambdaStructuresCore, LambdaStructuresDualCore
     from getter_one.analysis import CascadeTracker, NetworkAnalyzerCore, assess_confidence
+    from getter_one.pipeline_v2 import run_v2
 
 CLI:
     $ getter-one-loader load data.csv --target y -o prepared.csv
@@ -242,7 +243,8 @@ __all__ = [
 
 # Lazy-importable names (via __getattr__):
 #   Data:       load, merge, from_dataframe, from_numpy, GetterDataset
-#   Structures: LambdaStructuresCore, LambdaCoreConfig
+#   Structures: LambdaStructuresCore, LambdaCoreConfig,
+#               LambdaStructuresDualCore, DualCoreConfig
 #   Analysis:   NetworkAnalyzerCore, NetworkResult, DimensionLink,
 #               CooperativeEventNetwork, assess_confidence, ConfidenceReport,
 #               EventConfidence, BoundaryConfidence, CausalLinkConfidence,
@@ -251,6 +253,7 @@ __all__ = [
 #               CascadeChain, CascadeLink
 #   Inverse:    InverseChecker, VerificationResult, EventVerdict (GPU ONLY)
 #   Pipeline:   run, PipelineConfig, PipelineResult
+#   Pipeline V2: run_v2, PipelineV2Config, PipelineV2Result
 
 # ===============================
 # Lazy Imports
@@ -267,7 +270,7 @@ def __getattr__(name: str):
 
         return getattr(_loader, name)
 
-    # --- Structures ---
+    # --- Structures: Core ---
     if name == "LambdaStructuresCore":
         from getter_one.structures.lambda_structures_core import LambdaStructuresCore
 
@@ -277,6 +280,19 @@ def __getattr__(name: str):
         from getter_one.structures.lambda_structures_core import LambdaCoreConfig
 
         return LambdaCoreConfig
+
+    # --- Structures: DualCore ---
+    if name == "LambdaStructuresDualCore":
+        from getter_one.structures.lambda_structures_dual_core import (
+            LambdaStructuresDualCore,
+        )
+
+        return LambdaStructuresDualCore
+
+    if name == "DualCoreConfig":
+        from getter_one.structures.lambda_structures_dual_core import DualCoreConfig
+
+        return DualCoreConfig
 
     # --- Analysis: Network ---
     _network_names = {
@@ -333,7 +349,7 @@ def __getattr__(name: str):
                 f"{name} requires CUDA. Install CuPy: pip install getter-one[gpu]"
             ) from None
 
-    # --- Pipeline ---
+    # --- Pipeline (V1) ---
     _pipeline_names = {
         "run",
         "PipelineConfig",
@@ -343,5 +359,16 @@ def __getattr__(name: str):
         from getter_one import pipeline as _pipe
 
         return getattr(_pipe, name)
+
+    # --- Pipeline V2 (DualCore) ---
+    _pipeline_v2_names = {
+        "run_v2",
+        "PipelineV2Config",
+        "PipelineV2Result",
+    }
+    if name in _pipeline_v2_names:
+        from getter_one import pipeline_v2 as _pipe2
+
+        return getattr(_pipe2, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
