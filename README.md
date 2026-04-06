@@ -13,16 +13,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
-## v0.1.2 (2026-04) — 📄 Paper Submission Version
-
-> **This version corresponds to the manuscript submitted to Information Science.**
->
-> ```
-> pip install getter-one==0.1.2
-> ```
-
-
-### GETTER One is a **discrete geometric framework** for structural event detection and causal network extraction in N-dimensional time series.
+GETTER One is a **discrete geometric framework** for structural event detection and causal network extraction in N-dimensional time series.
 
 It is **not** a forecasting model. It detects *what is changing*, *when*, and *which dimensions are driving the change* — using closed-form geometric computations with no MCMC, no gradient descent, and no threshold tuning.
 
