@@ -244,7 +244,7 @@ class NetworkAnalyzerCore:
             for d in range(n_dims)
         }
         logger.info(
-            f"   ΔΛC events: "
+            "   ΔΛC events: "
             + ", ".join(
                 f"{dimension_names[d]}={event_counts[d]}"
                 for d in range(min(n_dims, 5))
@@ -735,7 +735,7 @@ class NetworkAnalyzerCore:
 
             # Z候補を探す: Z→A かつ Z→B が存在する次元
             for z in range(n_dims):
-                if z == a or z == b:
+                if z in (a, b):
                     continue
 
                 z_to_a = link_map.get((z, a))
@@ -945,9 +945,6 @@ class NetworkAnalyzerCore:
 
         for d in range(n_dims):
             series = displacement[:, d]
-            lstd = _calculate_local_std_1d(
-                state_vectors[:, d], self.local_std_window
-            )
             threshold_d = np.mean(series) + 1.5 * np.std(series)
             exceeding = np.where(series > threshold_d)[0]
             if len(exceeding) > 0:
@@ -977,7 +974,7 @@ class NetworkAnalyzerCore:
         if result.sync_network:
             logger.info("  Sync Network:")
             for link in sorted(
-                result.sync_network, key=lambda l: l.strength, reverse=True
+                result.sync_network, key=lambda lnk: lnk.strength, reverse=True
             ):
                 logger.info(
                     f"    {link.from_name} ↔ {link.to_name}: "
@@ -988,7 +985,7 @@ class NetworkAnalyzerCore:
         if result.causal_network:
             logger.info("  Causal Network:")
             for link in sorted(
-                result.causal_network, key=lambda l: l.strength, reverse=True
+                result.causal_network, key=lambda lnk: lnk.strength, reverse=True
             ):
                 logger.info(
                     f"    {link.from_name} → {link.to_name}: "
