@@ -92,9 +92,9 @@ def _banner_ascii():
 def _banner_getter():
     """ゲッター風バナー"""
     forms = [
-        ("EAGLE", "Aerial Type  // Structure Detection"),
-        ("JAGUAR", "Ground Type  // Causal Network"),
-        ("BEAR", "Marine Type  // Confidence Engine"),
+        ("EAGLE", "Detection  // Structural Event Detection"),
+        ("JAGUAR", "Network    // Causal Structure Estimation"),
+        ("BEAR", "Inverse    // Verification Engine"),
     ]
     form = random.choice(forms)
     print(f"""
@@ -147,33 +147,33 @@ def _banner_tamaki():
 # ===============================
 
 
-def cmd_run(args):
-    """パイプライン実行 (V1)"""
-    from getter_one.pipeline import PipelineConfig, run
+def cmd_detect(args):
+    """Detection パイプライン実行"""
+    from getter_one.pipeline_detection import DetectionPipelineConfig, run_detection
 
-    print("\n🚀 Starting GETTER One analysis...")
+    print("\n🚀 Starting GETTER One Detection Pipeline...")
     print(f"   Source:   {args.source}")
     if args.target:
         print(f"   Target:   {args.target}")
-    print(f"   Window:   {args.window}")
-    print(f"   Max lag:  {args.max_lag}")
+    print(f"   Window:   {args.window or 'adaptive'}")
     if GPU_AVAILABLE:
         print(f"   GPU:      {GPU_NAME}")
     else:
         print("   Mode:     CPU")
     print()
 
-    config = PipelineConfig(
+    config = DetectionPipelineConfig(
         window_steps=args.window,
-        max_lag=args.max_lag,
+        adaptive_window=args.window is None,
         n_permutations=args.n_perm,
         report_path=args.report,
         enable_confidence=not args.no_confidence,
-        enable_network=not args.no_network,
+        enable_inverse_checker=not args.no_inverse,
+        enable_cascade=not args.no_cascade,
     )
 
     try:
-        result = run(
+        result = run_detection(
             args.source,
             config=config,
             target=args.target,
@@ -196,42 +196,34 @@ def cmd_run(args):
         sys.exit(1)
 
 
-def cmd_run_v2(args):
-    """パイプライン実行 (V2 DualCore)"""
-    from getter_one.pipeline_v2 import PipelineV2Config, run_v2
+def cmd_network(args):
+    """Network パイプライン実行"""
+    from getter_one.pipeline_network import NetworkPipelineConfig, run_network
 
-    print("\n🚀 Starting GETTER One V2 (DualCore) analysis...")
+    print("\n🚀 Starting GETTER One Network Pipeline...")
     print(f"   Source:   {args.source}")
     if args.target:
         print(f"   Target:   {args.target}")
     print(f"   Window:   {args.window or 'adaptive'}")
     print(f"   Max lag:  {args.max_lag}")
-    print(
-        f"   Network:  local_std={'ON' if args.local_std else 'OFF'}, "
-        f"event_mask={'ON' if args.event_mask else 'OFF'}"
-    )
     if GPU_AVAILABLE:
         print(f"   GPU:      {GPU_NAME}")
     else:
         print("   Mode:     CPU")
     print()
 
-    config = PipelineV2Config(
+    config = NetworkPipelineConfig(
         window_steps=args.window,
         adaptive_window=args.window is None,
         max_lag=args.max_lag,
-        use_local_std_for_network=args.local_std,
-        use_event_mask_for_network=args.event_mask,
-        enable_cascade=not args.no_cascade,
-        enable_inverse_checker=not args.no_inverse,
-        enable_confidence=not args.no_confidence,
-        enable_network=not args.no_network,
         n_permutations=args.n_perm,
         report_path=args.report,
+        enable_confidence=not args.no_confidence,
+        enable_gpu_verification=args.gpu_verify,
     )
 
     try:
-        result = run_v2(
+        result = run_network(
             args.source,
             config=config,
             target=args.target,
@@ -316,10 +308,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Two-pipeline architecture:
+  detect   Structural event detection → verification → cascade tracking
+  network  Λ³-native causal structure estimation
+
 Examples:
-  getter-one run weather.csv --target precipitation --window 24
-  getter-one run-v2 financial.csv --local-std --event-mask
-  getter-one run-v2 market.csv --no-local-std --no-event-mask
+  getter-one detect weather.csv --target precipitation
+  getter-one network financial.csv --max-lag 10
   getter-one info
   getter-one check-gpu
 
@@ -344,113 +339,88 @@ GitHub: https://github.com/miosync-masa/getter-one
 
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
-    # --- run (V1) ---
-    p_run = sub.add_parser(
-        "run",
-        help="Run GETTER One analysis (V1 pipeline)",
+    # --- detect ---
+    p_det = sub.add_parser(
+        "detect",
+        help="Run Detection pipeline (event detection → verification → cascade)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  getter-one run weather.csv --target precipitation
-  getter-one run sensor_data.json --window 48 --max-lag 24
-  getter-one run experiment.parquet --report results.md --no-confidence
-        """,
-    )
-    p_run.add_argument("source", help="Input file (csv/json/parquet/xlsx/npy)")
-    p_run.add_argument("--target", help="Target column name")
-    p_run.add_argument("--time", help="Time column name")
-    p_run.add_argument(
-        "--normalize", default="range", choices=["range", "zscore", "none"]
-    )
-    p_run.add_argument(
-        "--window", type=int, default=24, help="Window steps for Λ³ (default: 24)"
-    )
-    p_run.add_argument(
-        "--max-lag", type=int, default=12, help="Max lag for causal (default: 12)"
-    )
-    p_run.add_argument(
-        "--n-perm", type=int, default=1000, help="Permutations for confidence"
-    )
-    p_run.add_argument("--report", help="Output report path (.md)")
-    p_run.add_argument("--no-confidence", action="store_true")
-    p_run.add_argument("--no-network", action="store_true")
-    p_run.add_argument("--verbose", "-v", action="store_true")
-    p_run.set_defaults(func=cmd_run)
-
-    # --- run-v2 (DualCore) ---
-    p_v2 = sub.add_parser(
-        "run-v2",
-        help="Run GETTER One V2 (DualCore: Local+Global, Cascade, InverseChecker)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-V2 DualCore Architecture:
-  Lambda → Detection (event_mask) → Network → Cascade → InverseChecker
-
-Network mode flags:
-  --local-std / --no-local-std    Dimensionless displacement (default: ON)
-  --event-mask / --no-event-mask  Event-filtered correlation (default: ON)
+Detection Pipeline:
+  DualCore → Detection (OR) → InverseChecker → Cascade → Report
 
 Examples:
-  getter-one run-v2 financial.csv                          # Full V2
-  getter-one run-v2 market.csv --no-local-std --no-event-mask  # V1-equivalent network
-  getter-one run-v2 data.csv --no-cascade --no-inverse     # DualCore Lambda only
+  getter-one detect weather.csv --target precipitation
+  getter-one detect sensor_data.json --window 48
+  getter-one detect experiment.parquet --no-inverse --no-cascade
         """,
     )
-    p_v2.add_argument("source", help="Input file (csv/json/parquet/xlsx/npy)")
-    p_v2.add_argument("--target", help="Target column name")
-    p_v2.add_argument("--time", help="Time column name")
-    p_v2.add_argument(
+    p_det.add_argument("source", help="Input file (csv/json/parquet/xlsx/npy)")
+    p_det.add_argument("--target", help="Target column name")
+    p_det.add_argument("--time", help="Time column name")
+    p_det.add_argument(
         "--normalize", default="range", choices=["range", "zscore", "none"]
     )
-    p_v2.add_argument(
+    p_det.add_argument(
         "--window",
         type=int,
         default=None,
-        help="Window steps (default: adaptive)",
+        help="Window steps for Λ³ (default: adaptive)",
     )
-    p_v2.add_argument(
-        "--max-lag", type=int, default=12, help="Max lag for causal (default: 12)"
-    )
-    p_v2.add_argument(
+    p_det.add_argument(
         "--n-perm", type=int, default=1000, help="Permutations for confidence"
     )
-    p_v2.add_argument("--report", help="Output report path (.md)")
+    p_det.add_argument("--report", help="Output report path (.md)")
+    p_det.add_argument("--no-inverse", action="store_true", help="Skip InverseChecker")
+    p_det.add_argument(
+        "--no-cascade", action="store_true", help="Skip Cascade tracking"
+    )
+    p_det.add_argument("--no-confidence", action="store_true")
+    p_det.add_argument("--verbose", "-v", action="store_true")
+    p_det.set_defaults(func=cmd_detect)
 
-    # Network mode flags
-    p_v2.add_argument(
-        "--local-std",
-        action="store_true",
-        default=True,
-        dest="local_std",
-        help="Enable dimensionless displacement (default)",
-    )
-    p_v2.add_argument(
-        "--no-local-std",
-        action="store_false",
-        dest="local_std",
-        help="Disable dimensionless displacement",
-    )
-    p_v2.add_argument(
-        "--event-mask",
-        action="store_true",
-        default=True,
-        dest="event_mask",
-        help="Enable event-filtered correlation (default)",
-    )
-    p_v2.add_argument(
-        "--no-event-mask",
-        action="store_false",
-        dest="event_mask",
-        help="Disable event-filtered correlation",
-    )
+    # --- network ---
+    p_net = sub.add_parser(
+        "network",
+        help="Run Network pipeline (Λ³-native causal structure estimation)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Network Pipeline:
+  DualCore → NetworkAnalyzerCore (Λ³ Native) → Confidence → Report
 
-    # Feature toggles
-    p_v2.add_argument("--no-cascade", action="store_true")
-    p_v2.add_argument("--no-inverse", action="store_true")
-    p_v2.add_argument("--no-confidence", action="store_true")
-    p_v2.add_argument("--no-network", action="store_true")
-    p_v2.add_argument("--verbose", "-v", action="store_true")
-    p_v2.set_defaults(func=cmd_run_v2)
+Examples:
+  getter-one network financial.csv --max-lag 10
+  getter-one network market.csv --gpu-verify
+  getter-one network data.csv --no-confidence
+        """,
+    )
+    p_net.add_argument("source", help="Input file (csv/json/parquet/xlsx/npy)")
+    p_net.add_argument("--target", help="Target column name")
+    p_net.add_argument("--time", help="Time column name")
+    p_net.add_argument(
+        "--normalize", default="range", choices=["range", "zscore", "none"]
+    )
+    p_net.add_argument(
+        "--window",
+        type=int,
+        default=None,
+        help="Window steps for Λ³ (default: adaptive)",
+    )
+    p_net.add_argument(
+        "--max-lag", type=int, default=10, help="Max lag for causal (default: 10)"
+    )
+    p_net.add_argument(
+        "--n-perm", type=int, default=200, help="Permutations for significance test"
+    )
+    p_net.add_argument("--report", help="Output report path (.md)")
+    p_net.add_argument(
+        "--gpu-verify",
+        action="store_true",
+        default=False,
+        help="Enable GPU 4-axis event quality verification",
+    )
+    p_net.add_argument("--no-confidence", action="store_true")
+    p_net.add_argument("--verbose", "-v", action="store_true")
+    p_net.set_defaults(func=cmd_network)
 
     # --- info ---
     p_info = sub.add_parser("info", help="Show system information")
@@ -477,8 +447,8 @@ def main():
     if args.command is None:
         parser.print_help()
         print("\n💡 Quick start:")
-        print("  getter-one run your_data.csv --target y")
-        print("  getter-one run-v2 your_data.csv  # DualCore pipeline")
+        print("  getter-one detect your_data.csv --target y   # Event detection")
+        print("  getter-one network your_data.csv             # Causal structure")
         sys.exit(0)
 
     args.func(args)
