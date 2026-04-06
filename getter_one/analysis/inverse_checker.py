@@ -1,8 +1,23 @@
 """
-Inverse Checker — Structural Verification for Cascade Events
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Inverse Checker — Structural Event Verification Gate
+=====================================================
 ⚠️ GPU ONLY — pip install getter-one[gpu]
 Built with 💕 by Masamichi & Tamaki
+
+Detection パイプラインの品質保証ゲート。
+5種のDetectorが検出した ΔΛC イベント候補を精査し、
+GENUINE（本物の構造変化）か SPURIOUS（ノイズ）かを判定する。
+
+位置づけ:
+  Detection (OR union) → ★ InverseChecker ★ → Cascade (GENUINEのみ)
+
+検証4軸:
+  1. Surrogate Test   — シャッフルしても再検出されるか（データ依存性）
+  2. ρT Consistency   — テンション蓄積後の発火か（物理的整合性）
+  3. Persistence      — 発火後に構造が変化したまま戻らないか（不可逆性）
+  4. Coordination     — 複数次元で協調的に発火しているか（構造的協調）
+
+4軸はGPU並列で全イベント同時計算され、重み付き統合スコアで判定する。
 """
 
 from __future__ import annotations
@@ -12,17 +27,30 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..analysis.cascade_tracker import CascadeEvent, CascadeResult
-
-# GPU ONLY import — raises ImportError if no CUDA
+# GPU ONLY
 from ..core.gpu_inverse import inverse_verify_all
 
 logger = logging.getLogger("getter_one.analysis.inverse_checker")
 
 
-# ===============================
-# Result Data Classes
-# ===============================
+# ============================================
+# Data Classes
+# ============================================
+
+
+@dataclass
+class DetectionCandidate:
+    """Detection OR統合後のイベント候補"""
+
+    frame: int
+    detected_by: list[str] = field(default_factory=list)  # どのdetectorが検出したか
+    n_detectors: int = 0  # 検出したdetector数（投票数）
+
+    # Λ³特徴量（抽出済み）
+    delta_lambda_c: float = 0.0  # ΔΛC強度
+    rho_t_at_event: float = 0.0  # イベント時点のρT
+    rho_t_before: float = 0.0  # イベント直前のρT平均
+    n_dims_active: int = 0  # 同時発火次元数
 
 
 @dataclass
@@ -33,39 +61,40 @@ class EventVerdict:
     frame: int
     delta_lambda_c: float
 
-    # 3軸スコア
-    reconstruction_error: float = 0.0  # 低い = 系の構造で説明可能
-    topo_score: float = 0.0  # 低い = 位相整合的
-    jump_score: float = 0.0  # 高い = 構造的に有意なジャンプ
+    # 4軸スコア（各 0.0〜1.0, 高い = GENUINE寄り）
+    surrogate_score: float = 0.0  # シャッフル再検出率
+    rho_t_score: float = 0.0  # テンション整合性
+    persistence_score: float = 0.0  # 構造変化の持続性
+    coordination_score: float = 0.0  # 多次元協調度
 
     # 統合
-    hybrid_score: float = 0.0  # 正 = NORMAL（壊れてない）, 負 = CRITICAL（壊れた）
-    is_normal: bool = True  # True = 系は健全, False = 系が壊れた（不可逆的構造変化）
+    genuineness: float = 0.0  # 重み付き統合スコア
+    is_genuine: bool = True  # True = 本物, False = ノイズ
 
-    # 名前付き情報（cascade_trackerから引き継ぎ）
+    # メタデータ
+    detected_by: list[str] = field(default_factory=list)
+    n_detectors: int = 0
+    genesis_dims: list[int] = field(default_factory=list)
     genesis_names: list[str] = field(default_factory=list)
 
     @property
-    def is_critical(self) -> bool:
-        """系が壊れたか（不可逆的構造変化）"""
-        return not self.is_normal
+    def is_spurious(self) -> bool:
+        return not self.is_genuine
 
     @property
     def verdict_label(self) -> str:
-        """判定ラベル"""
-        return "NORMAL" if self.is_normal else "CRITICAL"
+        return "GENUINE" if self.is_genuine else "SPURIOUS"
 
     @property
     def confidence_label(self) -> str:
-        """信頼度ラベル"""
-        h = self.hybrid_score
-        if h > 1.5:
+        g = self.genuineness
+        if g > 0.8:
             return "very_high"
-        if h > 0.5:
+        if g > 0.6:
             return "high"
-        if h > 0.0:
+        if g > 0.4:
             return "marginal"
-        if h > -0.5:
+        if g > 0.2:
             return "low"
         return "very_low"
 
@@ -74,424 +103,449 @@ class EventVerdict:
 class VerificationResult:
     """逆問題検証の全体結果"""
 
-    # イベント別結果
     verdicts: list[EventVerdict] = field(default_factory=list)
 
-    # 統計
     n_total: int = 0
-    n_normal: int = 0
-    n_critical: int = 0
-    normal_ratio: float = 0.0
+    n_genuine: int = 0
+    n_spurious: int = 0
+    genuine_ratio: float = 0.0
 
-    # 生スコア配列（npyで保存用）
-    raw_reconstruction_errors: np.ndarray | None = None
-    raw_topo_scores: np.ndarray | None = None
-    raw_jump_scores: np.ndarray | None = None
-    raw_hybrid_scores: np.ndarray | None = None
+    # 生スコア（npzで保存用）
+    raw_surrogate_scores: np.ndarray | None = None
+    raw_rho_t_scores: np.ndarray | None = None
+    raw_persistence_scores: np.ndarray | None = None
+    raw_coordination_scores: np.ndarray | None = None
+    raw_genuineness: np.ndarray | None = None
 
-    # === 後方互換性エイリアス ===
-    @property
-    def n_structural(self) -> int:
-        return self.n_normal
+    def genuine_events(self) -> list[EventVerdict]:
+        """GENUINEイベント（本物の構造変化）"""
+        return [v for v in self.verdicts if v.is_genuine]
 
-    @property
-    def n_noise(self) -> int:
-        return self.n_critical
+    def spurious_events(self) -> list[EventVerdict]:
+        """SPURIOUSイベント（ノイズ）"""
+        return [v for v in self.verdicts if v.is_spurious]
 
-    @property
-    def structural_ratio(self) -> float:
-        return self.normal_ratio
+    def genuine_frames(self) -> np.ndarray:
+        """GENUINEイベントのフレーム配列（CascadeTracker入力用）"""
+        return np.array([v.frame for v in self.verdicts if v.is_genuine])
 
-    def structural_events(self) -> list[EventVerdict]:
-        """後方互換: normal_events() のエイリアス"""
-        return self.normal_events()
-
-    def noise_events(self) -> list[EventVerdict]:
-        """後方互換: critical_events() のエイリアス"""
-        return self.critical_events()
-
-    # === 新API ===
-    def normal_events(self) -> list[EventVerdict]:
-        """NORMALイベント（系は壊れてない）"""
-        return [v for v in self.verdicts if v.is_normal]
-
-    def critical_events(self) -> list[EventVerdict]:
-        """CRITICALイベント（系が壊れた＝不可逆的構造変化）"""
-        return [v for v in self.verdicts if v.is_critical]
+    def genuine_mask(self, n_frames: int) -> np.ndarray:
+        """GENUINEイベントのboolマスク（CascadeTracker入力用）"""
+        mask = np.zeros(n_frames, dtype=bool)
+        for v in self.verdicts:
+            if v.is_genuine and v.frame < n_frames:
+                mask[v.frame] = True
+        return mask
 
     def get_verdict(self, event_id: int) -> EventVerdict | None:
-        """event_idで検索"""
         for v in self.verdicts:
             if v.event_id == event_id:
                 return v
         return None
 
     def save_raw(self, path: str) -> None:
-        """生スコアをnpzで保存"""
         np.savez_compressed(
             path,
-            reconstruction_errors=self.raw_reconstruction_errors,
-            topo_scores=self.raw_topo_scores,
-            jump_scores=self.raw_jump_scores,
-            hybrid_scores=self.raw_hybrid_scores,
+            surrogate_scores=self.raw_surrogate_scores,
+            rho_t_scores=self.raw_rho_t_scores,
+            persistence_scores=self.raw_persistence_scores,
+            coordination_scores=self.raw_coordination_scores,
+            genuineness=self.raw_genuineness,
         )
         logger.info(f"💾 Raw scores saved to {path}")
 
+    # === 後方互換エイリアス ===
+    @property
+    def n_structural(self) -> int:
+        return self.n_genuine
 
-# ===============================
-# Inverse Checker
-# ===============================
+    @property
+    def n_noise(self) -> int:
+        return self.n_spurious
+
+    @property
+    def structural_ratio(self) -> float:
+        return self.genuine_ratio
+
+    @property
+    def n_normal(self) -> int:
+        return self.n_genuine
+
+    @property
+    def n_critical(self) -> int:
+        return self.n_spurious
+
+    @property
+    def normal_ratio(self) -> float:
+        return self.genuine_ratio
+
+    def structural_events(self) -> list[EventVerdict]:
+        return self.genuine_events()
+
+    def noise_events(self) -> list[EventVerdict]:
+        return self.spurious_events()
+
+    def normal_events(self) -> list[EventVerdict]:
+        return self.genuine_events()
+
+    def critical_events(self) -> list[EventVerdict]:
+        return self.spurious_events()
+
+
+# ============================================
+# InverseChecker
+# ============================================
 
 
 class InverseChecker:
     """
-    逆問題による構造的イベント検証
+    逆問題による構造的イベント検証ゲート
 
-    CascadeTrackerの検出結果を受け取り、各イベントが
-    「Λ³構造で説明可能か」をGPU並列で検証する。
+    Detectionの後、Cascadeの前に挟まり、
+    検出されたΔΛCイベント候補が本物かノイズかを精査する。
 
     Parameters
     ----------
-    w_recon : float
-        再構成誤差の重み (default: 0.4)
-    w_topo : float
-        トポロジー保存の重み (default: 0.3)
-    w_jump : float
-        ジャンプ整合性の重み (default: 0.3)
-    jump_sigma : float
-        ジャンプ判定のσ倍率 (default: 2.5)
-    verdict_threshold : float
-        hybrid_score の判定閾値 (default: 0.0)
+    w_surrogate : float
+        Surrogate Test の重み
+    w_rho_t : float
+        ρT整合性の重み
+    w_persistence : float
+        持続性の重み
+    w_coordination : float
+        協調性の重み
+    genuineness_threshold : float
+        GENUINE判定の閾値（これ以上でGENUINE）
+    surrogate_n_trials : int
+        Surrogate Testのシャッフル回数
+    persistence_window : int
+        持続性判定の前後ウィンドウ
+    coordination_window : int
+        協調性判定のフレーム範囲
+    delta_percentile : float
+        ΔΛCイベント検出のパーセンタイル閾値
     """
 
     def __init__(
         self,
         *,
-        w_recon: float = 0.4,
-        w_topo: float = 0.3,
-        w_jump: float = 0.3,
-        jump_sigma: float = 2.5,
-        verdict_threshold: float = 0.0,
+        w_surrogate: float = 0.3,
+        w_rho_t: float = 0.25,
+        w_persistence: float = 0.25,
+        w_coordination: float = 0.2,
+        genuineness_threshold: float = 0.4,
+        surrogate_n_trials: int = 100,
+        persistence_window: int = 20,
+        coordination_window: int = 3,
+        delta_percentile: float = 94.0,
     ) -> None:
-        self.w_recon = w_recon
-        self.w_topo = w_topo
-        self.w_jump = w_jump
-        self.jump_sigma = jump_sigma
-        self.verdict_threshold = verdict_threshold
+        self.w_surrogate = w_surrogate
+        self.w_rho_t = w_rho_t
+        self.w_persistence = w_persistence
+        self.w_coordination = w_coordination
+        self.genuineness_threshold = genuineness_threshold
+        self.surrogate_n_trials = surrogate_n_trials
+        self.persistence_window = persistence_window
+        self.coordination_window = coordination_window
+        self.delta_percentile = delta_percentile
 
         logger.info(
             f"✅ InverseChecker initialized "
-            f"(w_recon={w_recon}, w_topo={w_topo}, w_jump={w_jump}, "
-            f"jump_σ={jump_sigma}, threshold={verdict_threshold})"
+            f"(w_surr={w_surrogate}, w_rhoT={w_rho_t}, "
+            f"w_persist={w_persistence}, w_coord={w_coordination}, "
+            f"threshold={genuineness_threshold})"
         )
+
+    # ================================================================
+    # Main Entry Point
+    # ================================================================
 
     def verify(
         self,
-        cascade_result: CascadeResult,
+        event_mask: np.ndarray,
         state_vectors: np.ndarray,
-        lambda_structures: dict[str, np.ndarray],
+        local_lambda: dict[str, np.ndarray],
         *,
-        event_ids: list[int] | None = None,
+        detector_labels: dict[int, list[str]] | None = None,
+        dimension_names: list[str] | None = None,
     ) -> VerificationResult:
         """
-        CascadeTrackerの結果を逆問題で検証
+        Detectionの結果を逆問題で検証
 
         Parameters
         ----------
-        cascade_result : CascadeResult
-            CascadeTracker.track() の出力
-        state_vectors : np.ndarray
-            (n_frames, n_dims) 元の状態ベクトル
-        lambda_structures : dict[str, np.ndarray]
-            LambdaStructuresCore.compute_lambda_structures() の出力
-        event_ids : list[int], optional
-            検証対象イベントのID群。Noneなら全イベント検証
+        event_mask : np.ndarray of shape (n_frames,)
+            Detection OR統合後のboolマスク（True = イベント候補）
+        state_vectors : np.ndarray of shape (n_frames, n_dims)
+            元の状態ベクトル
+        local_lambda : dict[str, np.ndarray]
+            DualCore._compute_local() の出力:
+              local_lambda_F : (n_frames-1, n_dims)
+              local_rho_T    : (n_frames, n_dims)
+              local_std      : (n_frames, n_dims)
+        detector_labels : dict[int, list[str]], optional
+            各フレームを検出したdetector名のリスト
+        dimension_names : list[str], optional
+            次元名
 
         Returns
         -------
         VerificationResult
-            全イベントの構造的検証結果
+            全イベント候補の検証結果。
+            genuine_mask() で CascadeTracker に渡すマスクが取れる。
         """
-        events = cascade_result.events
-        if not events:
-            logger.warning("⚠️ No events to verify")
+        n_frames, n_dims = state_vectors.shape
+
+        if dimension_names is None:
+            dimension_names = [f"dim_{i}" for i in range(n_dims)]
+
+        # イベント候補フレームの抽出
+        event_frames = np.where(event_mask)[0]
+
+        if len(event_frames) == 0:
+            logger.warning("⚠️ No event candidates to verify")
             return VerificationResult()
 
-        # 対象イベントのフィルタリング
-        if event_ids is not None:
-            target_ids = set(event_ids)
-            events = [e for e in events if e.event_id in target_ids]
-            if not events:
-                logger.warning("⚠️ No matching events found")
-                return VerificationResult()
+        logger.info(f"🔺 Verifying {len(event_frames)} event candidates...")
 
-        logger.info(f"🔺 Verifying {len(events)} events...")
+        # Λ³ Local特徴量の取得
+        local_lambda_f = local_lambda.get("local_lambda_F")
+        local_rho_t = local_lambda.get("local_rho_T")
+        local_std = local_lambda.get("local_std")
 
-        # イベント特徴量の抽出
-        event_features = self._extract_event_features(
-            events, state_vectors, lambda_structures
+        if local_lambda_f is None or local_rho_t is None:
+            raise ValueError(
+                "local_lambda must contain 'local_lambda_F' and 'local_rho_T'"
+            )
+
+        # 候補イベントの特徴量行列を構築
+        event_features = self._build_event_features(
+            event_frames,
+            state_vectors,
+            local_lambda_f,
+            local_rho_t,
+            local_std,
+            n_frames,
+            n_dims,
         )
 
-        # Λ³パス行列の構築
-        lambda_matrix = self._build_lambda_matrix(events, lambda_structures)
-
-        # GPU逆問題検証（全イベント並列）
+        # GPU並列で4軸検証
         raw = inverse_verify_all(
-            lambda_matrix=lambda_matrix,
-            events=event_features,
-            w_recon=self.w_recon,
-            w_topo=self.w_topo,
-            w_jump=self.w_jump,
-            jump_sigma=self.jump_sigma,
+            event_frames=event_frames,
+            state_vectors=state_vectors,
+            local_lambda_f=local_lambda_f,
+            local_rho_t=local_rho_t,
+            local_std=local_std,
+            event_features=event_features,
+            w_surrogate=self.w_surrogate,
+            w_rho_t=self.w_rho_t,
+            w_persistence=self.w_persistence,
+            w_coordination=self.w_coordination,
+            surrogate_n_trials=self.surrogate_n_trials,
+            persistence_window=self.persistence_window,
+            coordination_window=self.coordination_window,
+            delta_percentile=self.delta_percentile,
         )
 
         # 結果の構築
-        result = self._build_result(events, raw)
+        result = self._build_result(
+            event_frames,
+            raw,
+            local_lambda_f,
+            local_rho_t,
+            detector_labels,
+            dimension_names,
+            n_dims,
+        )
 
         self._print_summary(result)
 
         return result
 
-    def verify_genesis_only(
+    # ================================================================
+    # Event Feature Extraction
+    # ================================================================
+
+    def _build_event_features(
         self,
-        cascade_result: CascadeResult,
+        event_frames: np.ndarray,
         state_vectors: np.ndarray,
-        lambda_structures: dict[str, np.ndarray],
-    ) -> VerificationResult:
-        """
-        カスケードの起点（genesis）イベントのみ検証
-
-        カスケードの根っこが本物かどうかを判定する。
-        能登地震の教訓: 小さな変化こそ検証が重要。
-        """
-        # チェーンの起点イベントIDを収集
-        genesis_ids: set[int] = set()
-        for chain in cascade_result.chains:
-            if chain.event_ids:
-                genesis_ids.add(chain.event_ids[0])
-
-        if not genesis_ids:
-            logger.warning("⚠️ No genesis events found in chains")
-            return VerificationResult()
-
-        logger.info(f"🌱 Verifying {len(genesis_ids)} genesis events (chain origins)")
-
-        return self.verify(
-            cascade_result,
-            state_vectors,
-            lambda_structures,
-            event_ids=list(genesis_ids),
-        )
-
-    def filter_cascade(
-        self,
-        cascade_result: CascadeResult,
-        verification: VerificationResult,
-    ) -> CascadeResult:
-        """
-        検証結果に基づいてカスケードをフィルタリング
-
-        信頼度の低いgenesisから始まるチェーンを棄却し、
-        構造的に検証済みのカスケードマップを返す。
-
-        Parameters
-        ----------
-        cascade_result : CascadeResult
-            元のCascadeResult
-        verification : VerificationResult
-            verify()の結果
-
-        Returns
-        -------
-        CascadeResult
-            フィルタ済みの結果
-        """
-        # NORMALイベント（壊れてない）のIDセット
-        normal_ids = {v.event_id for v in verification.verdicts if v.is_normal}
-
-        # チェーンのフィルタ: 起点がNORMALなもののみ
-        filtered_chains = []
-        for chain in cascade_result.chains:
-            if not chain.event_ids:
-                continue
-            origin_id = chain.event_ids[0]
-            if origin_id in normal_ids:
-                filtered_chains.append(chain)
-
-        n_kept = len(filtered_chains)
-        n_dropped = len(cascade_result.chains) - n_kept
-
-        logger.info(
-            f"🔗 Cascade filter: {n_kept} chains kept, {n_dropped} chains dropped"
-        )
-
-        # 新しいCascadeResultを構築
-        filtered = CascadeResult(
-            events=cascade_result.events,
-            n_events=cascade_result.n_events,
-            links=cascade_result.links,
-            n_links=cascade_result.n_links,
-            chains=filtered_chains,
-            n_chains=n_kept,
-            longest_chain=(max((c.length for c in filtered_chains), default=0)),
-            dag=cascade_result.dag,
-            critical_dims=cascade_result.critical_dims,
-            critical_names=cascade_result.critical_names,
-            cascade_coverage=cascade_result.cascade_coverage,
-            mean_chain_length=(
-                float(np.mean([c.length for c in filtered_chains]))
-                if filtered_chains
-                else 0.0
-            ),
-            branching_ratio=cascade_result.branching_ratio,
-            dimension_names=cascade_result.dimension_names,
-        )
-
-        return filtered
-
-    # ===============================
-    # Internal Methods
-    # ===============================
-
-    def _extract_event_features(
-        self,
-        events: list[CascadeEvent],
-        state_vectors: np.ndarray,
-        lambda_structures: dict[str, np.ndarray],
+        local_lambda_f: np.ndarray,
+        local_rho_t: np.ndarray,
+        local_std: np.ndarray | None,
+        n_frames: int,
+        n_dims: int,
     ) -> np.ndarray:
         """
-        イベントフレームの特徴量を抽出
+        イベント候補の特徴量行列を構築
 
-        state_vectors + Λ³構造の値を結合して
-        イベント特徴量ベクトルを構築する。
+        各イベントフレームについて:
+          - state_vector
+          - local_rho_T (全次元)
+          - local_lambda_F (全次元、フレーム調整)
+          - local_std (全次元)
+        を結合する。
         """
-        n_events = len(events)
-        _, n_dims = state_vectors.shape
+        n_events = len(event_frames)
 
-        rho_t = lambda_structures.get("rho_T", np.zeros(len(state_vectors)))
-        sigma_s = lambda_structures.get("sigma_s", np.zeros(len(state_vectors)))
-        coherence = lambda_structures.get(
-            "structural_coherence", np.zeros(len(state_vectors))
-        )
-
-        # 特徴量: state_vector + rho_T + sigma_s + coherence
-        n_features = n_dims + 3
+        # 特徴量: state + rho_T + |lambda_F| + local_std
+        n_features = n_dims * 4
         features = np.zeros((n_events, n_features), dtype=np.float32)
 
-        for i, event in enumerate(events):
-            f = min(event.frame, len(state_vectors) - 1)
+        n_diff = local_lambda_f.shape[0]
+
+        for i, frame in enumerate(event_frames):
+            f = min(frame, n_frames - 1)
+            f_diff = min(frame, n_diff - 1)
+
             features[i, :n_dims] = state_vectors[f]
-            features[i, n_dims] = rho_t[f] if f < len(rho_t) else 0.0
-            features[i, n_dims + 1] = sigma_s[f] if f < len(sigma_s) else 0.0
-            features[i, n_dims + 2] = coherence[f] if f < len(coherence) else 0.0
+            features[i, n_dims : n_dims * 2] = local_rho_t[f]
+            features[i, n_dims * 2 : n_dims * 3] = np.abs(
+                local_lambda_f[f_diff]
+            )
+            if local_std is not None:
+                features[i, n_dims * 3 :] = local_std[f]
 
         return features
 
-    def _build_lambda_matrix(
-        self,
-        events: list[CascadeEvent],
-        lambda_structures: dict[str, np.ndarray],
-    ) -> np.ndarray:
-        """
-        イベントフレームのΛ³パス行列を構築
-
-        lambda_F の各次元を「パス」として、イベントフレームでの
-        値を抽出してパス行列を構成する。
-        """
-        lambda_f = lambda_structures.get("lambda_F")
-        if lambda_f is None:
-            raise ValueError("lambda_structures must contain 'lambda_F'")
-
-        n_events = len(events)
-        frames = [min(e.frame, len(lambda_f) - 1) for e in events]
-
-        if lambda_f.ndim == 2:
-            # (n_frames, n_dims) → n_paths = n_dims
-            n_paths = lambda_f.shape[1]
-            matrix = np.zeros((n_paths, n_events), dtype=np.float32)
-            for i, f in enumerate(frames):
-                matrix[:, i] = lambda_f[f]
-        elif lambda_f.ndim == 3:
-            # (n_frames, n_residues, 3) → n_paths = n_residues * 3
-            n_frames, n_res, n_comp = lambda_f.shape
-            n_paths = n_res * n_comp
-            matrix = np.zeros((n_paths, n_events), dtype=np.float32)
-            for i, f in enumerate(frames):
-                matrix[:, i] = lambda_f[f].ravel()
-        else:
-            raise ValueError(f"Unexpected lambda_F shape: {lambda_f.shape}")
-
-        return matrix
+    # ================================================================
+    # Result Construction
+    # ================================================================
 
     def _build_result(
         self,
-        events: list[CascadeEvent],
+        event_frames: np.ndarray,
         raw: dict[str, np.ndarray],
+        local_lambda_f: np.ndarray,
+        local_rho_t: np.ndarray,
+        detector_labels: dict[int, list[str]] | None,
+        dimension_names: list[str],
+        n_dims: int,
     ) -> VerificationResult:
         """GPU結果からVerificationResultを構築"""
+
         verdicts = []
-        for i, event in enumerate(events):
-            hybrid = float(raw["hybrid_scores"][i])
+        n_diff = local_lambda_f.shape[0]
+
+        for i, frame in enumerate(event_frames):
+            f_diff = min(frame, n_diff - 1)
+
+            # ΔΛC強度: local_lambda_Fの全次元の絶対値合計
+            delta_lc = float(np.sum(np.abs(local_lambda_f[f_diff])))
+
+            # 発火次元の特定
+            active_dims = np.where(np.abs(local_lambda_f[f_diff]) > 0)[0]
+            genesis_dims = active_dims.tolist()
+            genesis_names = [
+                dimension_names[d]
+                for d in genesis_dims
+                if d < len(dimension_names)
+            ]
+
+            # detector情報
+            det_by = []
+            n_det = 0
+            if detector_labels and frame in detector_labels:
+                det_by = detector_labels[frame]
+                n_det = len(det_by)
+
+            genuineness = float(raw["genuineness"][i])
+
             verdict = EventVerdict(
-                event_id=event.event_id,
-                frame=event.frame,
-                delta_lambda_c=event.delta_lambda_c,
-                reconstruction_error=float(raw["reconstruction_errors"][i]),
-                topo_score=float(raw["topo_scores"][i]),
-                jump_score=float(raw["jump_scores"][i]),
-                hybrid_score=hybrid,
-                is_normal=hybrid > self.verdict_threshold,
-                genesis_names=event.genesis_names,
+                event_id=i,
+                frame=int(frame),
+                delta_lambda_c=delta_lc,
+                surrogate_score=float(raw["surrogate_scores"][i]),
+                rho_t_score=float(raw["rho_t_scores"][i]),
+                persistence_score=float(raw["persistence_scores"][i]),
+                coordination_score=float(raw["coordination_scores"][i]),
+                genuineness=genuineness,
+                is_genuine=genuineness > self.genuineness_threshold,
+                detected_by=det_by,
+                n_detectors=n_det,
+                genesis_dims=genesis_dims,
+                genesis_names=genesis_names,
             )
             verdicts.append(verdict)
 
-        n_normal = sum(1 for v in verdicts if v.is_normal)
+        n_genuine = sum(1 for v in verdicts if v.is_genuine)
         n_total = len(verdicts)
 
         return VerificationResult(
             verdicts=verdicts,
             n_total=n_total,
-            n_normal=n_normal,
-            n_critical=n_total - n_normal,
-            normal_ratio=(n_normal / n_total if n_total > 0 else 0.0),
-            raw_reconstruction_errors=raw["reconstruction_errors"],
-            raw_topo_scores=raw["topo_scores"],
-            raw_jump_scores=raw["jump_scores"],
-            raw_hybrid_scores=raw["hybrid_scores"],
+            n_genuine=n_genuine,
+            n_spurious=n_total - n_genuine,
+            genuine_ratio=n_genuine / n_total if n_total > 0 else 0.0,
+            raw_surrogate_scores=raw["surrogate_scores"],
+            raw_rho_t_scores=raw["rho_t_scores"],
+            raw_persistence_scores=raw["persistence_scores"],
+            raw_coordination_scores=raw["coordination_scores"],
+            raw_genuineness=raw["genuineness"],
         )
 
-    def _print_summary(self, result: VerificationResult) -> None:
-        """検証サマリーを出力"""
-        logger.info("=" * 50)
-        logger.info("🔺 Inverse Verification Summary")
-        logger.info("=" * 50)
-        logger.info(f"  Total events: {result.n_total}")
-        logger.info(f"  NORMAL:   {result.n_normal} ({result.normal_ratio:.1%})")
-        logger.info(f"  CRITICAL: {result.n_critical}")
+    # ================================================================
+    # Output
+    # ================================================================
 
-        # 上位イベント
+    def _print_summary(self, result: VerificationResult) -> None:
+        logger.info("=" * 55)
+        logger.info("🔺 Inverse Verification Summary")
+        logger.info("=" * 55)
+        logger.info(f"  Total candidates: {result.n_total}")
+        logger.info(
+            f"  GENUINE:  {result.n_genuine} ({result.genuine_ratio:.1%})"
+        )
+        logger.info(f"  SPURIOUS: {result.n_spurious}")
+
         if result.verdicts:
             sorted_v = sorted(
-                result.verdicts, key=lambda v: v.hybrid_score, reverse=True
+                result.verdicts,
+                key=lambda v: v.genuineness,
+                reverse=True,
             )
-            logger.info("")
-            logger.info("  Top NORMAL events (system intact):")
-            for v in sorted_v[:5]:
-                label = v.verdict_label
-                logger.info(
-                    f"    [{label}] E{v.event_id:>3} "
-                    f"(frame={v.frame}) "
-                    f"hybrid={v.hybrid_score:+.3f} "
-                    f"[{v.confidence_label}]"
-                )
 
             logger.info("")
-            logger.info("  CRITICAL events (irreversible structural change):")
-            for v in sorted_v[-3:]:
-                label = v.verdict_label
-                logger.info(
-                    f"    [{label}] E{v.event_id:>3} "
-                    f"(frame={v.frame}) "
-                    f"hybrid={v.hybrid_score:+.3f} "
-                    f"[{v.confidence_label}]"
-                )
+            logger.info("  Top GENUINE events (real structural changes):")
+            for v in sorted_v[:5]:
+                if v.is_genuine:
+                    dims_str = (
+                        ", ".join(v.genesis_names[:3])
+                        if v.genesis_names
+                        else "N/A"
+                    )
+                    logger.info(
+                        f"    [GENUINE] E{v.event_id:>3} "
+                        f"(frame={v.frame}) "
+                        f"genuineness={v.genuineness:.3f} "
+                        f"[{v.confidence_label}] "
+                        f"dims=[{dims_str}]"
+                    )
+
+            spurious = [v for v in sorted_v if v.is_spurious]
+            if spurious:
+                logger.info("")
+                logger.info("  SPURIOUS events (noise, rejected):")
+                for v in spurious[-3:]:
+                    logger.info(
+                        f"    [SPURIOUS] E{v.event_id:>3} "
+                        f"(frame={v.frame}) "
+                        f"genuineness={v.genuineness:.3f} "
+                        f"[{v.confidence_label}]"
+                    )
+
+        # 4軸スコアの統計
+        if result.raw_genuineness is not None and len(result.raw_genuineness) > 0:
+            logger.info("")
+            logger.info("  Axis statistics (mean ± std):")
+            for name, scores in [
+                ("Surrogate", result.raw_surrogate_scores),
+                ("ρT Consistency", result.raw_rho_t_scores),
+                ("Persistence", result.raw_persistence_scores),
+                ("Coordination", result.raw_coordination_scores),
+            ]:
+                if scores is not None:
+                    logger.info(
+                        f"    {name:<16}: "
+                        f"{np.mean(scores):.3f} ± {np.std(scores):.3f}"
+                    )
