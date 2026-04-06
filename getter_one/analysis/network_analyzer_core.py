@@ -24,6 +24,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# GPU 4-axis verification (optional)
+try:
+    from ..core.gpu_inverse import network_verify_all
+
+    _HAS_GPU_VERIFY = True
+except ImportError:
+    _HAS_GPU_VERIFY = False
+
 logger = logging.getLogger("getter_one.analysis.network_analyzer_core")
 
 
@@ -46,6 +54,7 @@ class DimensionLink:
     lag: int = 0  # lag in frames for causal links
     p_value: float = 1.0  # permutation test p-value
     rho_t_corr: float = 0.0  # ρT correlation (supplementary)
+    event_quality: float = 0.0  # GPU 4-axis event genuineness (0〜1)
 
 
 @dataclass
@@ -80,6 +89,9 @@ class NetworkResult:
 
     # Λ³ event statistics
     event_counts: dict = field(default_factory=dict)
+
+    # GPU 4-axis event quality (per-dimension genuineness)
+    event_quality_scores: dict = field(default_factory=dict)
 
     # Adaptive parameters
     adaptive_params: dict | None = None
@@ -176,6 +188,7 @@ class NetworkAnalyzerCore:
         n_permutations: int = 200,
         p_value_threshold: float = 0.05,
         rho_t_weight: float = 0.3,
+        enable_gpu_verification: bool = False,
     ):
         self.sync_threshold = sync_threshold
         self.causal_threshold = causal_threshold
@@ -186,12 +199,15 @@ class NetworkAnalyzerCore:
         self.n_permutations = n_permutations
         self.p_value_threshold = p_value_threshold
         self.rho_t_weight = rho_t_weight
+        self.enable_gpu_verification = enable_gpu_verification and _HAS_GPU_VERIFY
 
+        gpu_status = "enabled" if self.enable_gpu_verification else "disabled"
         logger.info(
             f"✅ NetworkAnalyzerCore [Λ³ Native] initialized "
             f"(sync>{sync_threshold}, causal>{causal_threshold}, "
             f"max_lag={max_lag}, delta_pct={delta_percentile}, "
-            f"n_perm={n_permutations}, p<{p_value_threshold})"
+            f"n_perm={n_permutations}, p<{p_value_threshold}, "
+            f"gpu_verify={gpu_status})"
         )
 
     # ================================================================
@@ -229,14 +245,11 @@ class NetworkAnalyzerCore:
             state_vectors = state_vectors[:window]
             n_frames = len(state_vectors)
 
-        logger.info(
-            f"🔍 Λ³ Native Network Analysis "
-            f"({n_dims} dims, {n_frames} frames)"
-        )
+        logger.info(f"🔍 Λ³ Native Network Analysis ({n_dims} dims, {n_frames} frames)")
 
         # 1. Λ³特徴量抽出（各次元独立）
-        events_pos, events_neg, rho_t = self._extract_lambda3_events(
-            state_vectors, n_frames, n_dims
+        events_pos, events_neg, rho_t, local_lambda_f, local_std = (
+            self._extract_lambda3_events(state_vectors, n_frames, n_dims)
         )
 
         event_counts = {
@@ -246,8 +259,7 @@ class NetworkAnalyzerCore:
         logger.info(
             "   ΔΛC events: "
             + ", ".join(
-                f"{dimension_names[d]}={event_counts[d]}"
-                for d in range(min(n_dims, 5))
+                f"{dimension_names[d]}={event_counts[d]}" for d in range(min(n_dims, 5))
             )
             + ("..." if n_dims > 5 else "")
         )
@@ -287,12 +299,25 @@ class NetworkAnalyzerCore:
             causal_links, events_pos, events_neg, n_dims
         )
 
+        # 6.5 GPU 4軸イベント品質検証（オプション）
+        event_quality_scores = {}
+        if self.enable_gpu_verification:
+            event_quality_scores = self._gpu_event_quality(
+                state_vectors,
+                local_lambda_f,
+                rho_t,
+                local_std,
+                events_pos,
+                events_neg,
+                sync_links,
+                causal_links,
+                n_dims,
+            )
+
         # 7. パターン・ハブ・因果構造
         pattern = self._identify_pattern(sync_links, causal_links)
         hub_dims = self._detect_hubs(sync_links, causal_links, n_dims)
-        drivers, followers = self._identify_causal_structure(
-            causal_links, n_dims
-        )
+        drivers, followers = self._identify_causal_structure(causal_links, n_dims)
 
         result = NetworkResult(
             sync_network=sync_links,
@@ -313,6 +338,7 @@ class NetworkAnalyzerCore:
             n_causal_links=len(causal_links),
             dimension_names=dimension_names,
             event_counts=event_counts,
+            event_quality_scores=event_quality_scores,
         )
 
         self._print_summary(result)
@@ -362,7 +388,7 @@ class NetworkAnalyzerCore:
         state_vectors: np.ndarray,
         n_frames: int,
         n_dims: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         各次元からΔΛCイベント（pos/neg）とρTを抽出。
 
@@ -371,14 +397,18 @@ class NetworkAnalyzerCore:
 
         Returns
         -------
-        events_pos : (n_frames-1, n_dims)  正方向ΔΛC発火
-        events_neg : (n_frames-1, n_dims)  負方向ΔΛC発火
-        rho_t      : (n_frames, n_dims)    テンション密度
+        events_pos    : (n_frames-1, n_dims)  正方向ΔΛC発火
+        events_neg    : (n_frames-1, n_dims)  負方向ΔΛC発火
+        rho_t         : (n_frames, n_dims)    テンション密度
+        local_lambda_f: (n_frames-1, n_dims)  ジャンプ検出済みdiff（GPU検証用）
+        local_std     : (n_frames, n_dims)    局所標準偏差（GPU検証用）
         """
         n_diff = n_frames - 1
         events_pos = np.zeros((n_diff, n_dims))
         events_neg = np.zeros((n_diff, n_dims))
         rho_t = np.zeros((n_frames, n_dims))
+        local_lambda_f = np.zeros((n_diff, n_dims))
+        local_std_all = np.zeros((n_frames, n_dims))
 
         for d in range(n_dims):
             series = state_vectors[:, d]
@@ -390,13 +420,20 @@ class NetworkAnalyzerCore:
             score = np.abs(diff) / (lstd_diff + 1e-10)
             threshold = np.percentile(score, self.delta_percentile)
 
-            events_pos[:, d] = ((diff > 0) & (score > threshold)).astype(float)
-            events_neg[:, d] = ((diff < 0) & (score > threshold)).astype(float)
+            jump_mask = score > threshold
+            events_pos[:, d] = ((diff > 0) & jump_mask).astype(float)
+            events_neg[:, d] = ((diff < 0) & jump_mask).astype(float)
+
+            # DualCore互換: diff * mask
+            local_lambda_f[:, d] = diff * jump_mask
 
             # ρT
             rho_t[:, d] = _calculate_rho_t_1d(series, self.rho_t_window)
 
-        return events_pos, events_neg, rho_t
+            # local_std
+            local_std_all[:, d] = lstd
+
+        return events_pos, events_neg, rho_t, local_lambda_f, local_std_all
 
     # ================================================================
     # Step 2: Sync Matrix (ΔΛC co-firing + ρT correlation)
@@ -486,9 +523,7 @@ class NetworkAnalyzerCore:
                     (events_neg[:, i], events_neg[:, j]),
                 ]:
                     for lag in range(1, self.max_lag + 1):
-                        prob = self._propagation_probability(
-                            cause_ev, effect_ev, lag
-                        )
+                        prob = self._propagation_probability(cause_ev, effect_ev, lag)
                         if prob > best_prob:
                             best_prob = prob
                             best_lag = lag
@@ -686,9 +721,7 @@ class NetworkAnalyzerCore:
                                 correlation=1.0,  # 方向: i→j
                                 lag=int(lag),
                                 p_value=p,
-                                rho_t_corr=rho_t_corr_matrix[
-                                    min(i, j), max(i, j)
-                                ],
+                                rho_t_corr=rho_t_corr_matrix[min(i, j), max(i, j)],
                             )
                         )
 
@@ -746,10 +779,8 @@ class NetworkAnalyzerCore:
 
                 # 条件付き伝播確率:
                 # Z発火時のA→B伝播 vs Z未発火時のA→B伝播
-                prob_with_z, prob_without_z = (
-                    self._conditional_propagation(
-                        events_all, a, b, z, lag_ab
-                    )
+                prob_with_z, prob_without_z = self._conditional_propagation(
+                    events_all, a, b, z, lag_ab
                 )
 
                 # Z発火時にしかA→Bが起きない → スプリアス
@@ -826,6 +857,97 @@ class NetworkAnalyzerCore:
             prob_without = 0.0
 
         return float(prob_with), float(prob_without)
+
+    # ================================================================
+    # Step 6.5: GPU 4-Axis Event Quality Verification
+    # ================================================================
+
+    def _gpu_event_quality(
+        self,
+        state_vectors: np.ndarray,
+        local_lambda_f: np.ndarray,
+        rho_t: np.ndarray,
+        local_std: np.ndarray,
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        sync_links: list[DimensionLink],
+        causal_links: list[DimensionLink],
+        n_dims: int,
+    ) -> dict:
+        """
+        GPU 4軸（surrogate, ρT整合, 持続性, 協調性）で
+        各次元のΔΛCイベント品質を検証し、リンクに反映する。
+
+        Returns
+        -------
+        dict
+            per-dimension genuineness scores and raw results
+        """
+        # 全イベントフレームを収集
+        events_all = np.minimum(events_pos + events_neg, 1.0)
+        event_frames_list = []
+        for d in range(n_dims):
+            frames_d = np.where(events_all[:, d] > 0)[0]
+            event_frames_list.append(frames_d)
+
+        # 全次元のイベントを統合
+        all_frames = np.unique(
+            np.concatenate(event_frames_list) if event_frames_list else []
+        )
+
+        if len(all_frames) == 0:
+            return {}
+
+        logger.info(
+            f"   🔺 GPU 4-axis verification: {len(all_frames)} unique event frames"
+        )
+
+        # GPU 4軸検証実行
+        raw = network_verify_all(
+            event_frames=all_frames,
+            state_vectors=state_vectors,
+            local_lambda_f=local_lambda_f,
+            local_rho_t=rho_t,
+            local_std=local_std,
+        )
+
+        genuineness = raw["genuineness"]
+
+        # フレーム → genuineness のマッピング
+        frame_to_quality = {int(f): float(g) for f, g in zip(all_frames, genuineness)}
+
+        # 各次元のイベント品質平均
+        dim_quality = {}
+        for d in range(n_dims):
+            frames_d = event_frames_list[d]
+            if len(frames_d) > 0:
+                qualities = [frame_to_quality.get(int(f), 0.0) for f in frames_d]
+                dim_quality[d] = float(np.mean(qualities))
+            else:
+                dim_quality[d] = 0.0
+
+        # リンクにevent_quality反映
+        for link in sync_links:
+            q_from = dim_quality.get(link.from_dim, 0.0)
+            q_to = dim_quality.get(link.to_dim, 0.0)
+            link.event_quality = (q_from + q_to) / 2.0
+
+        for link in causal_links:
+            q_from = dim_quality.get(link.from_dim, 0.0)
+            q_to = dim_quality.get(link.to_dim, 0.0)
+            link.event_quality = (q_from + q_to) / 2.0
+
+        logger.info(
+            f"   ✅ Event quality: mean={np.mean(genuineness):.3f}, "
+            f"min={np.min(genuineness):.3f}, max={np.max(genuineness):.3f}"
+        )
+
+        return {
+            "dim_quality": dim_quality,
+            "raw_genuineness": genuineness,
+            "event_frames": all_frames,
+            "frame_to_quality": frame_to_quality,
+        }
 
     # ================================================================
     # Pattern / Hub / Causal Structure
@@ -976,10 +1098,13 @@ class NetworkAnalyzerCore:
             for link in sorted(
                 result.sync_network, key=lambda lnk: lnk.strength, reverse=True
             ):
+                eq_str = (
+                    f", eq={link.event_quality:.3f}" if link.event_quality > 0 else ""
+                )
                 logger.info(
                     f"    {link.from_name} ↔ {link.to_name}: "
                     f"{link.strength:.3f} (p={link.p_value:.3f}, "
-                    f"ρT_corr={link.rho_t_corr:.3f})"
+                    f"ρT_corr={link.rho_t_corr:.3f}{eq_str})"
                 )
 
         if result.causal_network:
@@ -987,8 +1112,11 @@ class NetworkAnalyzerCore:
             for link in sorted(
                 result.causal_network, key=lambda lnk: lnk.strength, reverse=True
             ):
+                eq_str = (
+                    f", eq={link.event_quality:.3f}" if link.event_quality > 0 else ""
+                )
                 logger.info(
                     f"    {link.from_name} → {link.to_name}: "
                     f"{link.strength:.3f} (lag={link.lag}, "
-                    f"p={link.p_value:.3f})"
+                    f"p={link.p_value:.3f}{eq_str})"
                 )
