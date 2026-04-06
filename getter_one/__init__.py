@@ -10,11 +10,16 @@ Omnidimensional Network Engine
 Discrete geometric structural change detection
 and causal network extraction for N-dimensional time series.
 
+Two-pipeline architecture:
+    Detection: Structural event detection → verification → cascade tracking
+    Network:   Λ³-native causal structure estimation
+
 Usage:
     from getter_one.data import load
     from getter_one.structures import LambdaStructuresCore, LambdaStructuresDualCore
     from getter_one.analysis import CascadeTracker, NetworkAnalyzerCore, assess_confidence
-    from getter_one.pipeline_v2 import run_v2
+    from getter_one.pipeline_detection import run_detection
+    from getter_one.pipeline_network import run_network
 
 CLI:
     $ getter-one-loader load data.csv --target y -o prepared.csv
@@ -34,7 +39,7 @@ from typing import Any
 # Version
 # ===============================
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 __author__ = "Masamichi Iizumi & Tamaki"
 
 # ===============================
@@ -252,8 +257,10 @@ __all__ = [
 #   Cascade:    CascadeTracker, CascadeResult, CascadeEvent,
 #               CascadeChain, CascadeLink
 #   Inverse:    InverseChecker, VerificationResult, EventVerdict (GPU ONLY)
-#   Pipeline:   run, PipelineConfig, PipelineResult
-#   Pipeline V2: run_v2, PipelineV2Config, PipelineV2Result
+#   Pipeline Detection: run_detection, DetectionPipelineConfig,
+#                        DetectionPipelineResult
+#   Pipeline Network:   run_network, NetworkPipelineConfig,
+#                        NetworkPipelineResult
 
 # ===============================
 # Lazy Imports
@@ -349,26 +356,26 @@ def __getattr__(name: str):
                 f"{name} requires CUDA. Install CuPy: pip install getter-one[gpu]"
             ) from None
 
-    # --- Pipeline (V1) ---
-    _pipeline_names = {
-        "run",
-        "PipelineConfig",
-        "PipelineResult",
+    # --- Pipeline Detection ---
+    _pipeline_detection_names = {
+        "run_detection",
+        "DetectionPipelineConfig",
+        "DetectionPipelineResult",
     }
-    if name in _pipeline_names:
-        from getter_one import pipeline as _pipe
+    if name in _pipeline_detection_names:
+        from getter_one import pipeline_detection as _pipe_det
 
-        return getattr(_pipe, name)
+        return getattr(_pipe_det, name)
 
-    # --- Pipeline V2 (DualCore) ---
-    _pipeline_v2_names = {
-        "run_v2",
-        "PipelineV2Config",
-        "PipelineV2Result",
+    # --- Pipeline Network ---
+    _pipeline_network_names = {
+        "run_network",
+        "NetworkPipelineConfig",
+        "NetworkPipelineResult",
     }
-    if name in _pipeline_v2_names:
-        from getter_one import pipeline_v2 as _pipe2
+    if name in _pipeline_network_names:
+        from getter_one import pipeline_network as _pipe_net
 
-        return getattr(_pipe2, name)
+        return getattr(_pipe_net, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
