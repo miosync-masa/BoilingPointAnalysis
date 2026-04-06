@@ -1,7 +1,22 @@
 """
-Network Analyzer Core - Domain-Agnostic
-========================================
-Built with 💕 by Masamichi & Tamaki
+Network Analyzer Core — Λ³ Native Engine
+==========================================
+Built by Masamichi & Tamaki
+
+Λ³ネイティブなネットワーク解析エンジン。
+偏相関ベースの旧エンジンを完全に置き換え、
+ΔΛCイベント伝播確率によるsync/causal検出を行う。
+
+Core mechanism:
+  Sync  : ΔΛC co-firing rate (lag=0) + ρT correlation
+  Causal: P(ΔΛC_j(t+k) | ΔΛC_i(t))  lagged propagation probability
+  Filter: conditional propagation probability (common ancestor removal)
+  Test  : permutation test for statistical significance
+
+理論的根拠:
+  旧エンジン (偏相関) は生の値の統計的関係を見ており、Λ³と無関係だった。
+  新エンジンは ΔΛC 構造変化イベント同士の伝播を直接検出するため、
+  Λ³理論とネイティブに接続されている。
 """
 
 import logging
@@ -13,289 +28,171 @@ logger = logging.getLogger("getter_one.analysis.network_analyzer_core")
 
 
 # ============================================
-# Data Classes
+# Data Classes (既存インターフェース維持)
 # ============================================
 
 
 @dataclass
 class DimensionLink:
-    """次元間ネットワークリンク"""
+    """A network link between two dimensions."""
 
     from_dim: int
     to_dim: int
     from_name: str
     to_name: str
     link_type: str  # 'sync' or 'causal'
-    strength: float  # 相関の絶対値
-    correlation: float  # 相関の符号付き値（正/負の相関を区別）
-    lag: int = 0  # causalの場合のラグ（フレーム数）
+    strength: float  # primary metric (co-firing rate or propagation prob)
+    correlation: float  # signed correlation or directional indicator
+    lag: int = 0  # lag in frames for causal links
+    p_value: float = 1.0  # permutation test p-value
+    rho_t_corr: float = 0.0  # ρT correlation (supplementary)
 
 
 @dataclass
 class NetworkResult:
-    """ネットワーク解析結果"""
+    """Container for full network analysis results."""
 
     sync_network: list[DimensionLink] = field(default_factory=list)
     causal_network: list[DimensionLink] = field(default_factory=list)
 
-    # 相関行列（生データ）
-    sync_matrix: np.ndarray | None = None  # (n_dims, n_dims)
-    causal_matrix: np.ndarray | None = None  # (n_dims, n_dims) 最大ラグ相関
-    causal_lag_matrix: np.ndarray | None = None  # (n_dims, n_dims) 最適ラグ
+    # Raw matrices
+    sync_matrix: np.ndarray | None = None  # (n_dims, n_dims) co-firing rate
+    causal_matrix: np.ndarray | None = None  # (n_dims, n_dims) max propagation prob
+    causal_lag_matrix: np.ndarray | None = None  # (n_dims, n_dims) optimal lag
+    rho_t_corr_matrix: np.ndarray | None = None  # (n_dims, n_dims) ρT correlation
 
-    # ネットワーク特性
-    pattern: str = "unknown"  # 'parallel', 'cascade', 'mixed'
+    # Network-level characteristics
+    pattern: str = "unknown"
     hub_dimensions: list[int] = field(default_factory=list)
     hub_names: list[str] = field(default_factory=list)
 
-    # 因果構造
-    causal_drivers: list[int] = field(default_factory=list)  # 駆動次元
-    causal_followers: list[int] = field(default_factory=list)  # 従属次元
+    # Causal structure summary
+    causal_drivers: list[int] = field(default_factory=list)
+    causal_followers: list[int] = field(default_factory=list)
     driver_names: list[str] = field(default_factory=list)
     follower_names: list[str] = field(default_factory=list)
 
-    # メタデータ
+    # Metadata
     n_dims: int = 0
     n_sync_links: int = 0
     n_causal_links: int = 0
     dimension_names: list[str] = field(default_factory=list)
 
-    # adaptive パラメータ（使用時のみ）
+    # Λ³ event statistics
+    event_counts: dict = field(default_factory=dict)
+
+    # Adaptive parameters
     adaptive_params: dict | None = None
 
 
 @dataclass
 class CooperativeEventNetwork:
-    """cooperative event発生時のネットワーク構造"""
+    """Local network structure around a cooperative event."""
 
     event_frame: int
     event_timestamp: str | None = None
     delta_lambda_c: float = 0.0
 
-    # イベント時のネットワーク
     network: NetworkResult | None = None
 
-    # イベント固有の情報
     initiator_dims: list[int] = field(default_factory=list)
     initiator_names: list[str] = field(default_factory=list)
     propagation_order: list[int] = field(default_factory=list)
 
 
 # ============================================
-# Network Analyzer Core
+# 1D Λ³ Feature Functions
+# ============================================
+
+
+def _calculate_local_std_1d(data: np.ndarray, window: int) -> np.ndarray:
+    """局所標準偏差（対称窓）— 無次元化の分母"""
+    n = len(data)
+    local_std = np.zeros(n)
+    for i in range(n):
+        start = max(0, i - window)
+        end = min(n, i + window + 1)
+        subset = data[start:end]
+        if len(subset) > 0:
+            local_std[i] = np.std(subset)
+    return local_std
+
+
+def _calculate_rho_t_1d(data: np.ndarray, window: int) -> np.ndarray:
+    """1次元テンション密度 (ρT) — 過去窓の局所標準偏差"""
+    n = len(data)
+    rho_t = np.zeros(n)
+    for i in range(n):
+        start = max(0, i - window)
+        end = i + 1
+        subset = data[start:end]
+        if len(subset) > 1:
+            rho_t[i] = np.std(subset)
+    return rho_t
+
+
+# ============================================
+# NetworkAnalyzerCore — Λ³ Native
 # ============================================
 
 
 class NetworkAnalyzerCore:
     """
-    汎用次元間ネットワーク解析
+    Λ³ネイティブ ネットワーク解析エンジン
 
-    N次元時系列データの各次元間の同期・因果関係を検出し、
-    ネットワーク構造として可視化可能な形で出力する。
+    ΔΛCイベント伝播確率に基づくsync/causal検出を行う。
+    偏相関は一切使用しない。
 
     Parameters
     ----------
     sync_threshold : float
-        同期ネットワーク判定閾値（adaptive=Trueならヒント値）
+        ΔΛC同時発火率の閾値（これ以上でsyncリンク候補）
     causal_threshold : float
-        因果ネットワーク判定閾値（adaptive=Trueならヒント値）
+        ΔΛC伝播確率の閾値（これ以上でcausalリンク候補）
     max_lag : int
-        因果推定の最大ラグ（adaptive=Trueならヒント値）
-    adaptive : bool
-        データ駆動の適応的パラメータ調整を有効にする
+        因果推定の最大ラグ
+    delta_percentile : float
+        ΔΛCイベント検出のパーセンタイル閾値
+    local_std_window : int
+        無次元化用の局所標準偏差ウィンドウ
+    rho_t_window : int
+        テンション密度計算のウィンドウ
+    n_permutations : int
+        有意性検定のpermutation回数
+    p_value_threshold : float
+        有意性の閾値
+    rho_t_weight : float
+        sync判定におけるρT相関の重み (0〜1)
     """
 
     def __init__(
         self,
-        sync_threshold: float = 0.5,
-        causal_threshold: float = 0.4,
-        max_lag: int = 12,
-        adaptive: bool = True,
+        sync_threshold: float = 0.05,
+        causal_threshold: float = 0.08,
+        max_lag: int = 10,
+        delta_percentile: float = 94.0,
+        local_std_window: int = 20,
+        rho_t_window: int = 30,
+        n_permutations: int = 200,
+        p_value_threshold: float = 0.05,
+        rho_t_weight: float = 0.3,
     ):
-        # ユーザー指定値（adaptive=True ならヒント値）
-        self.sync_threshold_hint = sync_threshold
-        self.causal_threshold_hint = causal_threshold
-        self.max_lag_hint = max_lag
-        self.adaptive = adaptive
-
-        # 実行時に更新されるパラメータ
         self.sync_threshold = sync_threshold
         self.causal_threshold = causal_threshold
         self.max_lag = max_lag
-
-        # 適応的パラメータの計算結果を保持
-        self.adaptive_params: dict | None = None
+        self.delta_percentile = delta_percentile
+        self.local_std_window = local_std_window
+        self.rho_t_window = rho_t_window
+        self.n_permutations = n_permutations
+        self.p_value_threshold = p_value_threshold
+        self.rho_t_weight = rho_t_weight
 
         logger.info(
-            f"✅ NetworkAnalyzerCore initialized "
+            f"✅ NetworkAnalyzerCore [Λ³ Native] initialized "
             f"(sync>{sync_threshold}, causal>{causal_threshold}, "
-            f"max_lag={max_lag}, adaptive={adaptive})"
+            f"max_lag={max_lag}, delta_pct={delta_percentile}, "
+            f"n_perm={n_permutations}, p<{p_value_threshold})"
         )
-
-    # ================================================================
-    # Adaptive Parameter Computation
-    # ================================================================
-
-    def _compute_adaptive_parameters(
-        self,
-        state_vectors: np.ndarray,
-    ) -> dict:
-        """
-        データ駆動の適応的パラメータ計算
-
-        CascadeTrackerのadaptive機構と同一の5指標から
-        ネットワーク解析用の閾値・ラグを動的に算出する。
-
-        指標:
-          1. グローバルボラティリティ（全体の変動度）
-          2. 時間的変動性（隣接フレーム間の変化率）
-          3. 次元間相関構造の複雑度
-          4. 局所的変動パターン（非定常性）
-          5. スペクトル特性（低周波支配度）
-
-        Returns
-        -------
-        dict
-            sync_threshold, causal_threshold, max_lag, scale_factor,
-            volatility_metrics
-        """
-        n_frames, n_dims = state_vectors.shape
-
-        # ── 1. グローバルボラティリティ ──
-        global_std = np.std(state_vectors)
-        global_mean = np.mean(np.abs(state_vectors))
-        volatility_ratio = global_std / (global_mean + 1e-10)
-
-        # ── 2. 時間的変動性（隣接フレーム間の変化率）──
-        temporal_changes = np.diff(state_vectors, axis=0)
-        temporal_volatility = np.mean(np.std(temporal_changes, axis=0))
-
-        # ── 3. 次元間の相関構造の複雑度 ──
-        if n_dims > 1:
-            corr_matrix = np.corrcoef(state_vectors.T)
-            triu = corr_matrix[np.triu_indices(n_dims, k=1)]
-            triu = triu[~np.isnan(triu)]
-            correlation_complexity = (
-                1.0 - np.mean(np.abs(triu)) if len(triu) > 0 else 0.5
-            )
-            mean_abs_corr = np.mean(np.abs(triu)) if len(triu) > 0 else 0.0
-        else:
-            correlation_complexity = 0.5
-            mean_abs_corr = 0.0
-
-        # ── 4. 局所的変動パターン ──
-        base_window = max(10, n_frames // 10)
-        local_volatilities = []
-        for i in range(0, n_frames - base_window, max(1, base_window // 2)):
-            window_data = state_vectors[i : i + base_window]
-            local_volatilities.append(np.std(window_data))
-
-        if len(local_volatilities) > 1:
-            volatility_variation = np.std(local_volatilities) / (
-                np.mean(local_volatilities) + 1e-10
-            )
-        else:
-            volatility_variation = 0.5
-
-        # ── 5. スペクトル解析（支配的周期の推定）──
-        fft_mag = np.abs(np.fft.fft(state_vectors, axis=0))
-        low_cutoff = max(1, n_frames // 10)
-        high_cutoff = max(2, n_frames // 2)
-        low_freq_ratio = np.sum(fft_mag[:low_cutoff]) / (
-            np.sum(fft_mag[:high_cutoff]) + 1e-10
-        )
-
-        # ── sync_threshold の動的調整 ──
-        # ボラティリティが高い → 閾値を上げる（ノイズに強く）
-        # 相関が全体的に高い → 閾値を上げる（意味のある相関だけ拾う）
-        # 相関が全体的に低い → 閾値を下げる（微弱な構造も拾う）
-        sync_adj = 0.0
-        if volatility_ratio > 2.0:
-            sync_adj += 0.1
-        elif volatility_ratio < 0.3:
-            sync_adj -= 0.1
-
-        if mean_abs_corr > 0.6:
-            sync_adj += 0.1  # 相関が強い系 → 閾値を上げて選別
-        elif mean_abs_corr < 0.2:
-            sync_adj -= 0.1  # 相関が弱い系 → 閾値を下げて拾う
-
-        if volatility_variation > 1.0:
-            sync_adj += 0.05  # 非定常 → やや厳しめに
-
-        sync_threshold = np.clip(self.sync_threshold_hint + sync_adj, 0.15, 0.85)
-
-        # ── causal_threshold の動的調整 ──
-        # 時間的変動が小さい → 閾値を下げる（微細な因果も拾う）
-        # 次元が多い → 閾値を上げる（偽因果を抑制）
-        causal_adj = 0.0
-        if temporal_volatility < global_std * 0.3:
-            causal_adj -= 0.1  # 静かな系 → 小さい因果も拾う
-        elif temporal_volatility > global_std * 2.0:
-            causal_adj += 0.1  # 激しい系 → 厳しめに
-
-        if n_dims > 50:
-            causal_adj += 0.1  # 多次元 → 偽因果リスクが高い
-        elif n_dims <= 5:
-            causal_adj -= 0.05  # 低次元 → 緩めでOK
-
-        if correlation_complexity > 0.7:
-            causal_adj -= 0.05  # 複雑な相関 → 因果を丁寧に拾う
-
-        causal_threshold = np.clip(self.causal_threshold_hint + causal_adj, 0.15, 0.80)
-
-        # ── max_lag の動的調整 ──
-        # 低周波支配 → ラグを伸ばす（ゆっくり伝播する系）
-        # 高周波支配 → ラグを縮める（速い伝播）
-        # データ長に応じてクリップ
-        scale_factor = 1.0
-        if low_freq_ratio > 0.8:
-            scale_factor *= 1.5
-        elif low_freq_ratio < 0.3:
-            scale_factor *= 0.7
-
-        if correlation_complexity > 0.7:
-            scale_factor *= 1.3  # 複雑な相関 → 伝播が遅い可能性
-
-        if temporal_volatility > global_std * 2.0:
-            scale_factor *= 0.8  # 変動が激しい → 短いラグで十分
-
-        raw_lag = int(self.max_lag_hint * scale_factor)
-        max_lag = int(np.clip(raw_lag, 3, max(5, n_frames // 5)))
-
-        params = {
-            "sync_threshold": float(sync_threshold),
-            "causal_threshold": float(causal_threshold),
-            "max_lag": max_lag,
-            "scale_factor": float(scale_factor),
-            "volatility_metrics": {
-                "global_volatility": float(volatility_ratio),
-                "temporal_volatility": float(temporal_volatility),
-                "correlation_complexity": float(correlation_complexity),
-                "local_variation": float(volatility_variation),
-                "low_freq_ratio": float(low_freq_ratio),
-                "mean_abs_corr": float(mean_abs_corr),
-            },
-        }
-
-        logger.info(
-            f"   Adaptive params: "
-            f"sync_th={sync_threshold:.3f} "
-            f"(hint={self.sync_threshold_hint}), "
-            f"causal_th={causal_threshold:.3f} "
-            f"(hint={self.causal_threshold_hint}), "
-            f"max_lag={max_lag} (hint={self.max_lag_hint})"
-        )
-        logger.info(
-            f"   Volatility: global={volatility_ratio:.3f}, "
-            f"temporal={temporal_volatility:.3f}, "
-            f"corr_complexity={correlation_complexity:.3f}, "
-            f"local_var={volatility_variation:.3f}, "
-            f"low_freq={low_freq_ratio:.3f}, "
-            f"mean_corr={mean_abs_corr:.3f}"
-        )
-
-        return params
 
     # ================================================================
     # Main Entry Point
@@ -306,83 +203,104 @@ class NetworkAnalyzerCore:
         state_vectors: np.ndarray,
         dimension_names: list[str] | None = None,
         window: int | None = None,
-        local_lambda: dict | None = None,
-        event_mask: np.ndarray | None = None,
     ) -> NetworkResult:
         """
-        全体ネットワーク解析
+        Λ³ネイティブなネットワーク解析を実行。
 
         Parameters
         ----------
-        state_vectors : np.ndarray (n_frames, n_dims)
-            N次元状態ベクトル時系列
+        state_vectors : np.ndarray of shape (n_frames, n_dims)
+            入力時系列データ
         dimension_names : list[str], optional
             各次元の名前
         window : int, optional
-            相関計算ウィンドウ（Noneなら全フレーム使用）
-        local_lambda : dict, optional
-            LambdaStructuresDualCore の Local (方式A) 出力。
-            渡された場合、displacement を local_std で無次元化して
-            スケール不変な偏相関を計算する。
-            期待されるキー: "local_std" (n_frames, n_dims)
-        event_mask : np.ndarray (n_frames,) bool, optional
-            Detection層のOR統合結果。True = 本物の構造変化。
-            渡された場合、構造変化フレームだけで偏相関を計算する。
+            解析ウィンドウ長。Noneの場合は全フレーム使用。
 
         Returns
         -------
         NetworkResult
-            ネットワーク解析結果
         """
         n_frames, n_dims = state_vectors.shape
 
         if dimension_names is None:
             dimension_names = [f"dim_{i}" for i in range(n_dims)]
 
-        if window is None:
-            window = n_frames
-
-        # adaptive パラメータ計算
-        if self.adaptive:
-            self.adaptive_params = self._compute_adaptive_parameters(state_vectors)
-            self.sync_threshold = self.adaptive_params["sync_threshold"]
-            self.causal_threshold = self.adaptive_params["causal_threshold"]
-            self.max_lag = self.adaptive_params["max_lag"]
+        if window is not None:
+            state_vectors = state_vectors[:window]
+            n_frames = len(state_vectors)
 
         logger.info(
-            f"🔍 Analyzing {n_dims}-dimensional network "
-            f"({n_frames} frames, window={window}, "
-            f"sync>{self.sync_threshold:.3f}, "
-            f"causal>{self.causal_threshold:.3f}, "
-            f"max_lag={self.max_lag})"
+            f"🔍 Λ³ Native Network Analysis "
+            f"({n_dims} dims, {n_frames} frames)"
         )
 
-        # 1. 相関計算
-        correlations = self._compute_correlations(
-            state_vectors, window, local_lambda, event_mask
+        # 1. Λ³特徴量抽出（各次元独立）
+        events_pos, events_neg, rho_t = self._extract_lambda3_events(
+            state_vectors, n_frames, n_dims
         )
 
-        # 2. ネットワーク構築
-        sync_links, causal_links = self._build_networks(correlations, dimension_names)
+        event_counts = {
+            d: int(np.sum(events_pos[:, d]) + np.sum(events_neg[:, d]))
+            for d in range(n_dims)
+        }
+        logger.info(
+            f"   ΔΛC events: "
+            + ", ".join(
+                f"{dimension_names[d]}={event_counts[d]}"
+                for d in range(min(n_dims, 5))
+            )
+            + ("..." if n_dims > 5 else "")
+        )
 
-        # 2.5. 共通祖先フィルタ（偽因果除去）
-        causal_links = self._filter_spurious_edges(causal_links)
+        # 2. Sync行列（ΔΛC同時発火率 + ρT相関）
+        sync_matrix, rho_t_corr_matrix = self._compute_sync_matrix(
+            events_pos, events_neg, rho_t, n_dims
+        )
 
-        # 3. パターン識別
+        # 3. Causal行列（ΔΛCラグ付き伝播確率）
+        causal_matrix, causal_lag_matrix = self._compute_causal_matrix(
+            events_pos, events_neg, n_dims
+        )
+
+        # 4. Permutation test で有意性判定
+        sync_pvalues = self._permutation_test_sync(
+            events_pos, events_neg, rho_t, sync_matrix, n_dims
+        )
+        causal_pvalues = self._permutation_test_causal(
+            events_pos, events_neg, causal_matrix, causal_lag_matrix, n_dims
+        )
+
+        # 5. ネットワーク構築
+        sync_links, causal_links = self._build_networks(
+            sync_matrix,
+            causal_matrix,
+            causal_lag_matrix,
+            rho_t_corr_matrix,
+            sync_pvalues,
+            causal_pvalues,
+            dimension_names,
+            n_dims,
+        )
+
+        # 6. 共通祖先フィルタ（Λ³条件付き伝播確率）
+        causal_links = self._filter_common_ancestor(
+            causal_links, events_pos, events_neg, n_dims
+        )
+
+        # 7. パターン・ハブ・因果構造
         pattern = self._identify_pattern(sync_links, causal_links)
-
-        # 4. ハブ次元検出
         hub_dims = self._detect_hubs(sync_links, causal_links, n_dims)
-
-        # 5. 因果構造（ドライバー/フォロワー）
-        drivers, followers = self._identify_causal_structure(causal_links, n_dims)
+        drivers, followers = self._identify_causal_structure(
+            causal_links, n_dims
+        )
 
         result = NetworkResult(
             sync_network=sync_links,
             causal_network=causal_links,
-            sync_matrix=correlations["sync"],
-            causal_matrix=correlations["max_lagged"],
-            causal_lag_matrix=correlations["best_lag"],
+            sync_matrix=sync_matrix,
+            causal_matrix=causal_matrix,
+            causal_lag_matrix=causal_lag_matrix,
+            rho_t_corr_matrix=rho_t_corr_matrix,
             pattern=pattern,
             hub_dimensions=hub_dims,
             hub_names=[dimension_names[d] for d in hub_dims],
@@ -394,7 +312,7 @@ class NetworkAnalyzerCore:
             n_sync_links=len(sync_links),
             n_causal_links=len(causal_links),
             dimension_names=dimension_names,
-            adaptive_params=self.adaptive_params,
+            event_counts=event_counts,
         )
 
         self._print_summary(result)
@@ -408,12 +326,7 @@ class NetworkAnalyzerCore:
         window_after: int = 6,
         dimension_names: list[str] | None = None,
     ) -> CooperativeEventNetwork:
-        """
-        cooperative event発生時の局所ネットワーク解析
-
-        イベント前後のウィンドウで因果構造を分析し、
-        どの次元がイベントを「発火」させたかを推定する。
-        """
+        """ΔΛCイベント周辺の局所ネットワーク解析"""
         n_frames, n_dims = state_vectors.shape
 
         if dimension_names is None:
@@ -423,15 +336,11 @@ class NetworkAnalyzerCore:
         end = min(n_frames, event_frame + window_after)
         local_data = state_vectors[start:end]
 
-        # 局所ネットワーク解析
-        network = self.analyze(local_data, dimension_names, window=len(local_data))
+        network = self.analyze(local_data, dimension_names)
 
-        # イベント発火次元の推定
         initiators = self._identify_initiators(
             state_vectors, event_frame, window_before, n_dims
         )
-
-        # 伝播順序の推定
         propagation = self._estimate_propagation_order(
             state_vectors, event_frame, window_before, n_dims
         )
@@ -445,261 +354,299 @@ class NetworkAnalyzerCore:
         )
 
     # ================================================================
-    # 相関計算
+    # Step 1: Λ³ Event Extraction
     # ================================================================
 
-    def _compute_correlations(
+    def _extract_lambda3_events(
         self,
         state_vectors: np.ndarray,
-        window: int,
-        local_lambda: dict | None = None,
-        event_mask: np.ndarray | None = None,
-    ) -> dict:
+        n_frames: int,
+        n_dims: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        全次元ペアの相関計算（同期・因果）
+        各次元からΔΛCイベント（pos/neg）とρTを抽出。
 
-        n_dims >= 3 の場合は偏相関を使用し、交絡変数の影響を除去する。
-        n_dims < 3 の場合はペアワイズ相関にフォールバック。
+        DualCoreの _compute_local と同じロジック:
+          diff → local_std で無次元化 → percentile閾値 → バイナリイベント
 
-        local_lambda が渡された場合、displacement を local_std で
-        無次元化してスケール不変な偏相関を計算する。
-
-        event_mask が渡された場合、構造変化フレームだけで偏相関を計算する。
+        Returns
+        -------
+        events_pos : (n_frames-1, n_dims)  正方向ΔΛC発火
+        events_neg : (n_frames-1, n_dims)  負方向ΔΛC発火
+        rho_t      : (n_frames, n_dims)    テンション密度
         """
-        n_frames, n_dims = state_vectors.shape
-        w = min(window, n_frames)
+        n_diff = n_frames - 1
+        events_pos = np.zeros((n_diff, n_dims))
+        events_neg = np.zeros((n_diff, n_dims))
+        rho_t = np.zeros((n_frames, n_dims))
 
-        sync_matrix = np.zeros((n_dims, n_dims))
-        max_lagged_matrix = np.zeros((n_dims, n_dims))
-        best_lag_matrix = np.zeros((n_dims, n_dims), dtype=int)
+        for d in range(n_dims):
+            series = state_vectors[:, d]
 
-        # 変位ベクトル（1次差分）で相関を計算
-        # 生データの相関だとトレンドに引きずられるため
-        raw_displacement = np.diff(state_vectors[:w], axis=0)
+            # diff → 無次元化 → 閾値 → バイナリ
+            diff = np.diff(series)
+            lstd = _calculate_local_std_1d(series, self.local_std_window)
+            lstd_diff = lstd[1:]
+            score = np.abs(diff) / (lstd_diff + 1e-10)
+            threshold = np.percentile(score, self.delta_percentile)
 
-        # Local Lambda (方式A) が渡された場合: 無次元化
-        if local_lambda is not None and "local_std" in local_lambda:
-            local_std = local_lambda["local_std"][:w]
-            local_std_diff = local_std[1:]  # diff と長さを合わせる
-            displacement = raw_displacement / (local_std_diff + 1e-10)
-            logger.info("   📐 Using dimensionless displacement (local_std normalized)")
-        else:
-            displacement = raw_displacement
+            events_pos[:, d] = ((diff > 0) & (score > threshold)).astype(float)
+            events_neg[:, d] = ((diff < 0) & (score > threshold)).astype(float)
 
-        # Detection結果 (event_mask) が渡された場合: 構造変化フレームだけに絞る
-        if event_mask is not None:
-            # event_mask[t]=True → フレームtで構造変化
-            # displacement[t-1] = state[t] - state[t-1] が対応
-            disp_mask = event_mask[1:w]
-            n_events = int(np.sum(disp_mask))
-            if n_events >= 3:
-                displacement = displacement[disp_mask]
-                logger.info(
-                    f"   🎯 Event mask applied: "
-                    f"{n_events}/{len(disp_mask)} frames "
-                    f"({100 * n_events / len(disp_mask):.1f}% = structural events)"
-                )
-            else:
-                logger.warning(
-                    f"   ⚠️ Event mask has only {n_events} events, "
-                    f"using all frames as fallback"
-                )
+            # ρT
+            rho_t[:, d] = _calculate_rho_t_1d(series, self.rho_t_window)
 
-        use_partial = n_dims >= 3
-
-        # ── 同期偏相関: 精度行列方式（効率的に全ペア同時計算）──
-        if use_partial:
-            sync_matrix = self._compute_partial_corr_precision(displacement)
-        else:
-            for i in range(n_dims):
-                for j in range(i + 1, n_dims):
-                    ts_i = displacement[:, i]
-                    ts_j = displacement[:, j]
-                    if np.std(ts_i) < 1e-10 or np.std(ts_j) < 1e-10:
-                        continue
-                    corr = np.corrcoef(ts_i, ts_j)[0, 1]
-                    if np.isnan(corr):
-                        corr = 0.0
-                    sync_matrix[i, j] = corr
-                    sync_matrix[j, i] = corr
-
-        # ── ラグ付き偏相関（因果推定）: 残差方式 ──
-        for i in range(n_dims):
-            for j in range(i + 1, n_dims):
-                best_corr = 0.0
-                best_lag = 0
-
-                for lag in range(1, min(self.max_lag + 1, len(displacement) - 1)):
-                    # i → j（iがlagフレーム先行）
-                    corr_ij = self._lagged_partial_corr(
-                        displacement, i, j, lag, use_partial
-                    )
-                    if abs(corr_ij) > abs(best_corr):
-                        best_corr = corr_ij
-                        best_lag = lag
-
-                    # j → i（jがlagフレーム先行）
-                    corr_ji = self._lagged_partial_corr(
-                        displacement, j, i, lag, use_partial
-                    )
-                    if abs(corr_ji) > abs(best_corr):
-                        best_corr = corr_ji
-                        best_lag = -lag
-
-                max_lagged_matrix[i, j] = best_corr
-                max_lagged_matrix[j, i] = best_corr
-                best_lag_matrix[i, j] = best_lag
-                best_lag_matrix[j, i] = -best_lag
-
-        return {
-            "sync": sync_matrix,
-            "max_lagged": max_lagged_matrix,
-            "best_lag": best_lag_matrix,
-        }
-
-    @staticmethod
-    def _compute_partial_corr_precision(data: np.ndarray) -> np.ndarray:
-        """
-        精度行列（逆共分散行列）から偏相関行列を計算
-
-        pcorr(i,j) = -P[i,j] / sqrt(P[i,i] * P[j,j])
-
-        交絡変数の影響が自動的に除去される。
-        """
-        n_dims = data.shape[1]
-        cov = np.cov(data.T)
-
-        # 特異行列対策: 正則化
-        cov += np.eye(n_dims) * 1e-8
-
-        try:
-            precision = np.linalg.inv(cov)
-        except np.linalg.LinAlgError:
-            precision = np.linalg.pinv(cov)
-
-        # 偏相関に変換
-        diag = np.sqrt(np.abs(np.diag(precision)))
-        diag[diag < 1e-10] = 1e-10
-        partial_corr = np.zeros((n_dims, n_dims))
-        for i in range(n_dims):
-            for j in range(i + 1, n_dims):
-                pc = -precision[i, j] / (diag[i] * diag[j])
-                pc = np.clip(pc, -1.0, 1.0)
-                partial_corr[i, j] = pc
-                partial_corr[j, i] = pc
-
-        return partial_corr
-
-    @staticmethod
-    def _lagged_partial_corr(
-        displacement: np.ndarray,
-        src: int,
-        dst: int,
-        lag: int,
-        use_partial: bool,
-    ) -> float:
-        """
-        ラグ付き偏相関の計算（多重ラグ残差方式）
-
-        src → dst (lag) の因果相関を計算する際、
-        他の全次元の同時刻＋複数ラグの影響を除去する。
-        これにより交絡変数のラグ経由の影響も除去できる。
-        """
-        n_samples, n_dims = displacement.shape
-        if lag >= n_samples - 1:
-            return 0.0
-
-        ts_src = displacement[:-lag, src]
-        ts_dst = displacement[lag:, dst]
-        n = min(len(ts_src), len(ts_dst))
-        ts_src = ts_src[:n]
-        ts_dst = ts_dst[:n]
-
-        if np.std(ts_src) < 1e-10 or np.std(ts_dst) < 1e-10:
-            return 0.0
-
-        if not use_partial or n_dims < 3:
-            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
-            return 0.0 if np.isnan(corr) else float(corr)
-
-        # 条件付き変数: src,dst以外の全次元の複数ラグ値
-        other_dims = [d for d in range(n_dims) if d != src and d != dst]
-        if not other_dims:
-            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
-            return 0.0 if np.isnan(corr) else float(corr)
-
-        # 複数ラグの条件付き変数を構築
-        max_cond_lag = min(lag + 2, n - 1)
-        z_parts = []
-        for cl in range(max_cond_lag + 1):
-            start_s = max(0, cl)
-            end_s = start_s + n
-            if end_s <= len(displacement) - lag + cl:
-                z_lag = displacement[start_s:end_s, :][:, other_dims]
-                if len(z_lag) >= n:
-                    z_parts.append(z_lag[:n])
-
-        if not z_parts:
-            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
-            return 0.0 if np.isnan(corr) else float(corr)
-
-        z = np.hstack(z_parts)
-
-        # 特異行列対策
-        z_std = np.std(z, axis=0)
-        valid_cols = z_std > 1e-10
-        if not np.any(valid_cols):
-            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
-            return 0.0 if np.isnan(corr) else float(corr)
-        z = z[:, valid_cols]
-
-        # 多重共線性対策: 条件数が高すぎる場合はSVDで次元削減
-        if z.shape[1] > z.shape[0] // 2:
-            try:
-                u, s, _ = np.linalg.svd(z, full_matrices=False)
-                cumvar = np.cumsum(s**2) / np.sum(s**2)
-                n_keep = max(1, int(np.searchsorted(cumvar, 0.95)) + 1)
-                z = u[:, :n_keep] * s[:n_keep]
-            except np.linalg.LinAlgError:
-                pass
-
-        # 線形回帰で条件付き変数の影響を除去
-        try:
-            z_pinv = np.linalg.pinv(z)
-            resid_src = ts_src - z @ (z_pinv @ ts_src)
-            resid_dst = ts_dst - z @ (z_pinv @ ts_dst)
-        except np.linalg.LinAlgError:
-            corr = np.corrcoef(ts_src, ts_dst)[0, 1]
-            return 0.0 if np.isnan(corr) else float(corr)
-
-        if np.std(resid_src) < 1e-10 or np.std(resid_dst) < 1e-10:
-            return 0.0
-
-        corr = np.corrcoef(resid_src, resid_dst)[0, 1]
-        return 0.0 if np.isnan(corr) else float(corr)
+        return events_pos, events_neg, rho_t
 
     # ================================================================
-    # ネットワーク構築
+    # Step 2: Sync Matrix (ΔΛC co-firing + ρT correlation)
+    # ================================================================
+
+    def _compute_sync_matrix(
+        self,
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        rho_t: np.ndarray,
+        n_dims: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        ΔΛC同時発火率 + ρT相関のブレンドによるsync行列
+
+        sync_score = (1 - w) * cofiring_rate + w * |ρT_corr|
+        """
+        # 全イベント（pos + neg 合算）
+        events_all = np.minimum(events_pos + events_neg, 1.0)
+
+        cofiring_matrix = np.zeros((n_dims, n_dims))
+        rho_t_corr_matrix = np.zeros((n_dims, n_dims))
+        sync_matrix = np.zeros((n_dims, n_dims))
+
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                # ΔΛC co-firing rate
+                cofiring = np.mean(events_all[:, i] * events_all[:, j])
+                cofiring_matrix[i, j] = cofiring
+                cofiring_matrix[j, i] = cofiring
+
+                # ρT correlation
+                rt_i = rho_t[:, i]
+                rt_j = rho_t[:, j]
+                if np.std(rt_i) > 1e-10 and np.std(rt_j) > 1e-10:
+                    corr = np.corrcoef(rt_i, rt_j)[0, 1]
+                    if np.isnan(corr):
+                        corr = 0.0
+                else:
+                    corr = 0.0
+                rho_t_corr_matrix[i, j] = corr
+                rho_t_corr_matrix[j, i] = corr
+
+                # Blended sync score
+                w = self.rho_t_weight
+                score = (1 - w) * cofiring + w * abs(corr)
+                sync_matrix[i, j] = score
+                sync_matrix[j, i] = score
+
+        return sync_matrix, rho_t_corr_matrix
+
+    # ================================================================
+    # Step 3: Causal Matrix (ΔΛC lagged propagation probability)
+    # ================================================================
+
+    def _compute_causal_matrix(
+        self,
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        n_dims: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        ΔΛCラグ付き伝播確率行列。
+
+        P(ΔΛC_j(t+k) | ΔΛC_i(t)) を全ペア・全ラグで計算し、
+        最大伝播確率とその最適ラグを記録する。
+
+        pos→pos, pos→neg, neg→pos, neg→neg の4パターンを
+        統合して最大を取る。
+        """
+        causal_matrix = np.zeros((n_dims, n_dims))
+        lag_matrix = np.zeros((n_dims, n_dims), dtype=int)
+
+        for i in range(n_dims):
+            for j in range(n_dims):
+                if i == j:
+                    continue
+
+                best_prob = 0.0
+                best_lag = 0
+
+                # 4パターンの伝播確率を計算
+                for cause_ev, effect_ev in [
+                    (events_pos[:, i], events_pos[:, j]),
+                    (events_pos[:, i], events_neg[:, j]),
+                    (events_neg[:, i], events_pos[:, j]),
+                    (events_neg[:, i], events_neg[:, j]),
+                ]:
+                    for lag in range(1, self.max_lag + 1):
+                        prob = self._propagation_probability(
+                            cause_ev, effect_ev, lag
+                        )
+                        if prob > best_prob:
+                            best_prob = prob
+                            best_lag = lag
+
+                causal_matrix[i, j] = best_prob
+                lag_matrix[i, j] = best_lag
+
+        return causal_matrix, lag_matrix
+
+    @staticmethod
+    def _propagation_probability(
+        cause: np.ndarray,
+        effect: np.ndarray,
+        lag: int,
+    ) -> float:
+        """
+        P(effect(t+lag) = 1 | cause(t) = 1)
+
+        条件付き確率 = joint / marginal
+        """
+        if lag >= len(cause):
+            return 0.0
+
+        cause_past = cause[:-lag]
+        effect_future = effect[lag:]
+
+        n_cause = np.sum(cause_past)
+        if n_cause < 1:
+            return 0.0
+
+        joint = np.sum(cause_past * effect_future)
+        return joint / n_cause
+
+    # ================================================================
+    # Step 4: Permutation Tests
+    # ================================================================
+
+    def _permutation_test_sync(
+        self,
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        rho_t: np.ndarray,
+        observed_sync: np.ndarray,
+        n_dims: int,
+    ) -> np.ndarray:
+        """sync行列に対するpermutation test → p-value行列"""
+        pvalues = np.ones((n_dims, n_dims))
+        events_all = np.minimum(events_pos + events_neg, 1.0)
+
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                obs = observed_sync[i, j]
+                if obs < 1e-10:
+                    continue
+
+                count_ge = 0
+                for _ in range(self.n_permutations):
+                    # 片方のイベント系列をシャッフル
+                    shuffled = events_all[:, j].copy()
+                    np.random.shuffle(shuffled)
+
+                    cofiring = np.mean(events_all[:, i] * shuffled)
+
+                    # ρTもシャッフル
+                    shuffled_rt = rho_t[:, j].copy()
+                    np.random.shuffle(shuffled_rt)
+                    rt_i = rho_t[:, i]
+                    if np.std(rt_i) > 1e-10 and np.std(shuffled_rt) > 1e-10:
+                        corr = np.corrcoef(rt_i, shuffled_rt)[0, 1]
+                        if np.isnan(corr):
+                            corr = 0.0
+                    else:
+                        corr = 0.0
+
+                    w = self.rho_t_weight
+                    null_score = (1 - w) * cofiring + w * abs(corr)
+
+                    if null_score >= obs:
+                        count_ge += 1
+
+                p = (count_ge + 1) / (self.n_permutations + 1)
+                pvalues[i, j] = p
+                pvalues[j, i] = p
+
+        return pvalues
+
+    def _permutation_test_causal(
+        self,
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        observed_causal: np.ndarray,
+        observed_lag: np.ndarray,
+        n_dims: int,
+    ) -> np.ndarray:
+        """causal行列に対するpermutation test → p-value行列"""
+        pvalues = np.ones((n_dims, n_dims))
+
+        for i in range(n_dims):
+            for j in range(n_dims):
+                if i == j:
+                    continue
+
+                obs = observed_causal[i, j]
+                if obs < 1e-10:
+                    continue
+
+                count_ge = 0
+                for _ in range(self.n_permutations):
+                    # effect側のイベント系列をシャッフル
+                    best_null = 0.0
+                    for cause_ev, effect_ev_orig in [
+                        (events_pos[:, i], events_pos[:, j]),
+                        (events_pos[:, i], events_neg[:, j]),
+                        (events_neg[:, i], events_pos[:, j]),
+                        (events_neg[:, i], events_neg[:, j]),
+                    ]:
+                        shuffled = effect_ev_orig.copy()
+                        np.random.shuffle(shuffled)
+                        for lag in range(1, self.max_lag + 1):
+                            prob = self._propagation_probability(
+                                cause_ev, shuffled, lag
+                            )
+                            if prob > best_null:
+                                best_null = prob
+
+                    if best_null >= obs:
+                        count_ge += 1
+
+                pvalues[i, j] = (count_ge + 1) / (self.n_permutations + 1)
+
+        return pvalues
+
+    # ================================================================
+    # Step 5: Network Construction
     # ================================================================
 
     def _build_networks(
         self,
-        correlations: dict,
+        sync_matrix: np.ndarray,
+        causal_matrix: np.ndarray,
+        causal_lag_matrix: np.ndarray,
+        rho_t_corr_matrix: np.ndarray,
+        sync_pvalues: np.ndarray,
+        causal_pvalues: np.ndarray,
         dimension_names: list[str],
+        n_dims: int,
     ) -> tuple[list[DimensionLink], list[DimensionLink]]:
-        """相関行列からネットワークリンクを構築"""
-        n_dims = len(dimension_names)
+        """閾値 + p-value でフィルタしてリンク構築"""
         sync_links = []
         causal_links = []
 
+        # Sync links
         for i in range(n_dims):
             for j in range(i + 1, n_dims):
-                sync_corr = correlations["sync"][i, j]
-                causal_corr = correlations["max_lagged"][i, j]
-                lag = correlations["best_lag"][i, j]
+                score = sync_matrix[i, j]
+                p = sync_pvalues[i, j]
 
-                # 同期リンク
-                if abs(sync_corr) > self.sync_threshold:
+                if score > self.sync_threshold and p < self.p_value_threshold:
                     sync_links.append(
                         DimensionLink(
                             from_dim=i,
@@ -707,56 +654,71 @@ class NetworkAnalyzerCore:
                             from_name=dimension_names[i],
                             to_name=dimension_names[j],
                             link_type="sync",
-                            strength=abs(sync_corr),
-                            correlation=sync_corr,
+                            strength=score,
+                            correlation=rho_t_corr_matrix[i, j],
+                            p_value=p,
+                            rho_t_corr=rho_t_corr_matrix[i, j],
                         )
                     )
 
-                # 因果リンク
-                # 同期相関より有意にラグ相関が強い場合のみ因果と判定
-                if (
-                    abs(causal_corr) > self.causal_threshold
-                    and abs(causal_corr) > abs(sync_corr) * 1.1
-                ):
-                    # ラグの符号で因果の方向を決定
-                    if lag > 0:
-                        from_d, to_d = i, j
-                    else:
-                        from_d, to_d = j, i
-                        lag = abs(lag)
+        # Causal links
+        for i in range(n_dims):
+            for j in range(n_dims):
+                if i == j:
+                    continue
 
-                    causal_links.append(
-                        DimensionLink(
-                            from_dim=from_d,
-                            to_dim=to_d,
-                            from_name=dimension_names[from_d],
-                            to_name=dimension_names[to_d],
-                            link_type="causal",
-                            strength=abs(causal_corr),
-                            correlation=causal_corr,
-                            lag=lag,
+                prob = causal_matrix[i, j]
+                lag = causal_lag_matrix[i, j]
+                p = causal_pvalues[i, j]
+
+                if prob > self.causal_threshold and p < self.p_value_threshold:
+                    # causal > sync * 1.1 で方向性を確認
+                    sync_score = sync_matrix[min(i, j), max(i, j)]
+                    if prob > sync_score * 1.1 or sync_score < self.sync_threshold:
+                        causal_links.append(
+                            DimensionLink(
+                                from_dim=i,
+                                to_dim=j,
+                                from_name=dimension_names[i],
+                                to_name=dimension_names[j],
+                                link_type="causal",
+                                strength=prob,
+                                correlation=1.0,  # 方向: i→j
+                                lag=int(lag),
+                                p_value=p,
+                                rho_t_corr=rho_t_corr_matrix[
+                                    min(i, j), max(i, j)
+                                ],
+                            )
                         )
-                    )
 
         return sync_links, causal_links
 
-    def _filter_spurious_edges(
+    # ================================================================
+    # Step 6: Common Ancestor Filter (Λ³ Conditional Propagation)
+    # ================================================================
+
+    def _filter_common_ancestor(
         self,
         causal_links: list[DimensionLink],
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        n_dims: int,
     ) -> list[DimensionLink]:
         """
-        共通祖先による偽因果エッジの除去
+        共通祖先フィルタ — Λ³条件付き伝播確率
 
-        A→B が検出された時、Z→A かつ Z→B が両方 A→B より強い
-        共通祖先 Z が存在する場合、A→B を偽因果として除去する。
-
-        これにより偏相関で除去しきれない交絡変数のラグ経由の
-        影響を、グラフ構造レベルで検出・除去できる。
+        A→B の因果候補に対し、Z が存在して
+          P(ΔΛC_B | ΔΛC_A, ΔΛC_Z未発火) が大幅に低下する場合、
+        A→B はスプリアスとして除去する。
         """
-        if len(causal_links) < 3:
+        if len(causal_links) < 2 or n_dims < 3:
             return causal_links
 
-        # 因果リンクの高速参照用辞書: (from, to) -> link
+        # 全イベント合算
+        events_all = np.minimum(events_pos + events_neg, 1.0)
+
+        # リンクマップ構築
         link_map: dict[tuple[int, int], DimensionLink] = {}
         for link in causal_links:
             key = (link.from_dim, link.to_dim)
@@ -768,49 +730,105 @@ class NetworkAnalyzerCore:
 
         for link in causal_links:
             a, b = link.from_dim, link.to_dim
-            has_common_ancestor = False
+            lag_ab = link.lag
+            is_spurious = False
 
-            # 全候補 Z について Z→A, Z→B の存在をチェック
-            for (z_src, z_dst), z_link_a in link_map.items():
-                if z_dst != a:
-                    continue
-                z = z_src
-                if z in (a, b):
+            # Z候補を探す: Z→A かつ Z→B が存在する次元
+            for z in range(n_dims):
+                if z == a or z == b:
                     continue
 
-                # Z→B も存在するか？
-                z_link_b = link_map.get((z, b))
-                if z_link_b is None:
+                z_to_a = link_map.get((z, a))
+                z_to_b = link_map.get((z, b))
+
+                if z_to_a is None or z_to_b is None:
                     continue
 
-                # Z→A が A→B より強く、Z→B も存在
-                # → A は Z に駆動されており、A→B は Z の影響の反映
-                if z_link_a.strength > link.strength:
-                    has_common_ancestor = True
+                # 条件付き伝播確率:
+                # Z発火時のA→B伝播 vs Z未発火時のA→B伝播
+                prob_with_z, prob_without_z = (
+                    self._conditional_propagation(
+                        events_all, a, b, z, lag_ab
+                    )
+                )
+
+                # Z発火時にしかA→Bが起きない → スプリアス
+                if (
+                    prob_without_z < link.strength * 0.5
+                    and prob_with_z > prob_without_z * 1.5
+                ):
+                    is_spurious = True
                     logger.debug(
-                        f"   🔍 Spurious edge removed: "
-                        f"{link.from_name}→{link.to_name} "
-                        f"(confounder: {z_link_a.from_name}, "
-                        f"strength {link.strength:.3f} < "
-                        f"{z_link_a.strength:.3f}, {z_link_b.strength:.3f})"
+                        f"   🔍 Spurious: {link.from_name}→{link.to_name} "
+                        f"(ancestor: dim_{z}, "
+                        f"P_with={prob_with_z:.3f}, "
+                        f"P_without={prob_without_z:.3f})"
                     )
                     break
 
-            if has_common_ancestor:
+            if is_spurious:
                 n_removed += 1
             else:
                 filtered.append(link)
 
         if n_removed > 0:
             logger.info(
-                f"   🔍 Spurious edge filter: {n_removed} removed, "
-                f"{len(filtered)} retained"
+                f"   🔍 Common ancestor filter: "
+                f"{n_removed} removed, {len(filtered)} retained"
             )
 
         return filtered
 
+    @staticmethod
+    def _conditional_propagation(
+        events_all: np.ndarray,
+        a: int,
+        b: int,
+        z: int,
+        lag: int,
+    ) -> tuple[float, float]:
+        """
+        Z発火条件付きのA→B伝播確率
+
+        Returns
+        -------
+        prob_with_z : Z発火時のP(B(t+lag)|A(t))
+        prob_without_z : Z未発火時のP(B(t+lag)|A(t))
+        """
+        if lag >= len(events_all):
+            return 0.0, 0.0
+
+        a_events = events_all[:-lag, a]
+        b_events = events_all[lag:, b]
+
+        # Zの発火状態（Aと同時点 ± 数フレーム内で発火していたか）
+        z_active = np.zeros(len(a_events))
+        for t in range(len(a_events)):
+            z_start = max(0, t - 2)
+            z_end = min(len(events_all), t + 3)
+            if np.any(events_all[z_start:z_end, z] > 0):
+                z_active[t] = 1.0
+
+        # A発火 かつ Z発火 のケース
+        mask_with = (a_events > 0) & (z_active > 0)
+        n_with = np.sum(mask_with)
+        if n_with > 0:
+            prob_with = np.sum(mask_with * b_events) / n_with
+        else:
+            prob_with = 0.0
+
+        # A発火 かつ Z未発火 のケース
+        mask_without = (a_events > 0) & (z_active == 0)
+        n_without = np.sum(mask_without)
+        if n_without > 0:
+            prob_without = np.sum(mask_without * b_events) / n_without
+        else:
+            prob_without = 0.0
+
+        return float(prob_with), float(prob_without)
+
     # ================================================================
-    # パターン識別・ハブ検出・因果構造
+    # Pattern / Hub / Causal Structure
     # ================================================================
 
     def _identify_pattern(
@@ -818,16 +836,15 @@ class NetworkAnalyzerCore:
         sync_links: list[DimensionLink],
         causal_links: list[DimensionLink],
     ) -> str:
-        """ネットワークパターンの識別"""
         n_sync = len(sync_links)
         n_causal = len(causal_links)
 
         if n_sync == 0 and n_causal == 0:
             return "independent"
         elif n_sync > n_causal * 2:
-            return "parallel"  # 同期的協調（全次元が同時に動く）
+            return "parallel"
         elif n_causal > n_sync * 2:
-            return "cascade"  # カスケード伝播（次元間に時間差）
+            return "cascade"
         else:
             return "mixed"
 
@@ -837,9 +854,7 @@ class NetworkAnalyzerCore:
         causal_links: list[DimensionLink],
         n_dims: int,
     ) -> list[int]:
-        """ハブ次元の検出（多くの次元と強く結合している次元）"""
         connectivity = np.zeros(n_dims)
-
         for link in sync_links + causal_links:
             connectivity[link.from_dim] += link.strength
             connectivity[link.to_dim] += link.strength
@@ -847,10 +862,8 @@ class NetworkAnalyzerCore:
         if np.max(connectivity) == 0:
             return []
 
-        # 平均+1σ以上の接続強度を持つ次元をハブとする
         threshold = np.mean(connectivity) + np.std(connectivity)
         hubs = np.where(connectivity > threshold)[0].tolist()
-
         return sorted(hubs, key=lambda d: connectivity[d], reverse=True)
 
     def _identify_causal_structure(
@@ -858,31 +871,31 @@ class NetworkAnalyzerCore:
         causal_links: list[DimensionLink],
         n_dims: int,
     ) -> tuple[list[int], list[int]]:
-        """因果構造の特定（ドライバー/フォロワー）"""
-        out_degree = np.zeros(n_dims)  # 駆動する側
-        in_degree = np.zeros(n_dims)  # 駆動される側
+        out_strength = np.zeros(n_dims)
+        in_strength = np.zeros(n_dims)
 
         for link in causal_links:
-            out_degree[link.from_dim] += link.strength
-            in_degree[link.to_dim] += link.strength
+            out_strength[link.from_dim] += link.strength
+            in_strength[link.to_dim] += link.strength
 
-        # ドライバー: out_degree >> in_degree
-        drivers = []
-        followers = []
-
-        for d in range(n_dims):
-            if out_degree[d] > 0 and out_degree[d] > in_degree[d] * 1.5:
-                drivers.append(d)
-            elif in_degree[d] > 0 and in_degree[d] > out_degree[d] * 1.5:
-                followers.append(d)
+        drivers = [
+            d
+            for d in range(n_dims)
+            if out_strength[d] > 0 and out_strength[d] > in_strength[d] * 1.5
+        ]
+        followers = [
+            d
+            for d in range(n_dims)
+            if in_strength[d] > 0 and in_strength[d] > out_strength[d] * 1.5
+        ]
 
         return (
-            sorted(drivers, key=lambda d: out_degree[d], reverse=True),
-            sorted(followers, key=lambda d: in_degree[d], reverse=True),
+            sorted(drivers, key=lambda d: out_strength[d], reverse=True),
+            sorted(followers, key=lambda d: in_strength[d], reverse=True),
         )
 
     # ================================================================
-    # イベント解析ヘルパー
+    # Event Analysis Helpers
     # ================================================================
 
     def _identify_initiators(
@@ -892,31 +905,25 @@ class NetworkAnalyzerCore:
         lookback: int,
         n_dims: int,
     ) -> list[int]:
-        """
-        cooperative eventの発火次元を推定
-
-        イベント直前のウィンドウで最も早く・大きく動き始めた次元を特定。
-        """
+        """ΔΛCイベントの発火タイミングで発起者を推定"""
         start = max(0, event_frame - lookback)
         pre_event = state_vectors[start : event_frame + 1]
 
         if len(pre_event) < 3:
             return []
 
+        # 各次元でΔΛCイベントを検出し、最も早く発火した次元を特定
         displacement = np.diff(pre_event, axis=0)
-
-        # 各次元の「動き出しの早さ × 大きさ」をスコア化
         scores = np.zeros(n_dims)
+
         for d in range(n_dims):
             abs_disp = np.abs(displacement[:, d])
-            # 後半ほど重みが大きい（イベント直前の動きを重視）
-            weights = np.linspace(0.5, 2.0, len(abs_disp))
+            # 早期に大きく動いた次元ほど高スコア
+            weights = np.linspace(2.0, 0.5, len(abs_disp))
             scores[d] = np.sum(abs_disp * weights)
 
-        # 上位次元を返す
         threshold = np.mean(scores) + np.std(scores)
         initiators = np.where(scores > threshold)[0]
-
         return sorted(initiators, key=lambda d: scores[d], reverse=True)
 
     def _estimate_propagation_order(
@@ -926,11 +933,7 @@ class NetworkAnalyzerCore:
         lookback: int,
         n_dims: int,
     ) -> list[int]:
-        """
-        イベントの伝播順序を推定
-
-        各次元が閾値を超えた最初のフレームで順序付け。
-        """
+        """ΔΛC発火の伝播順序を推定"""
         start = max(0, event_frame - lookback)
         window = state_vectors[start : event_frame + 1]
 
@@ -938,64 +941,57 @@ class NetworkAnalyzerCore:
             return list(range(n_dims))
 
         displacement = np.abs(np.diff(window, axis=0))
-
-        # 各次元の「爆発タイミング」を検出
-        # 移動平均を超えた最初のフレーム
         onset_frames = np.full(n_dims, len(displacement))
 
         for d in range(n_dims):
             series = displacement[:, d]
-            threshold = np.mean(series) + 1.5 * np.std(series)
-
-            exceeding = np.where(series > threshold)[0]
+            lstd = _calculate_local_std_1d(
+                state_vectors[:, d], self.local_std_window
+            )
+            threshold_d = np.mean(series) + 1.5 * np.std(series)
+            exceeding = np.where(series > threshold_d)[0]
             if len(exceeding) > 0:
                 onset_frames[d] = exceeding[0]
 
-        # onset_frameの早い順にソート
         return list(np.argsort(onset_frames))
 
     # ================================================================
-    # 出力
+    # Output
     # ================================================================
 
     def _print_summary(self, result: NetworkResult) -> None:
-        """結果サマリーの表示"""
-        logger.info("=" * 50)
-        logger.info("Network Analysis Summary")
-        logger.info("=" * 50)
+        logger.info("=" * 55)
+        logger.info("Λ³ Native Network Analysis Summary")
+        logger.info("=" * 55)
         logger.info(f"  Pattern: {result.pattern}")
         logger.info(f"  Sync links: {result.n_sync_links}")
         logger.info(f"  Causal links: {result.n_causal_links}")
 
         if result.hub_names:
-            logger.info(f"  Hub dimensions: {', '.join(result.hub_names)}")
-
+            logger.info(f"  Hubs: {', '.join(result.hub_names)}")
         if result.driver_names:
-            logger.info(f"  Causal drivers: {', '.join(result.driver_names)}")
-
+            logger.info(f"  Drivers: {', '.join(result.driver_names)}")
         if result.follower_names:
-            logger.info(f"  Causal followers: {', '.join(result.follower_names)}")
+            logger.info(f"  Followers: {', '.join(result.follower_names)}")
 
         if result.sync_network:
             logger.info("  Sync Network:")
             for link in sorted(
-                result.sync_network,
-                key=lambda lnk: lnk.strength,
-                reverse=True,
+                result.sync_network, key=lambda l: l.strength, reverse=True
             ):
-                sign = "+" if link.correlation > 0 else "−"
                 logger.info(
-                    f"    {link.from_name} ↔ {link.to_name}: {sign}{link.strength:.3f}"
+                    f"    {link.from_name} ↔ {link.to_name}: "
+                    f"{link.strength:.3f} (p={link.p_value:.3f}, "
+                    f"ρT_corr={link.rho_t_corr:.3f})"
                 )
 
         if result.causal_network:
             logger.info("  Causal Network:")
             for link in sorted(
-                result.causal_network,
-                key=lambda lnk: lnk.strength,
-                reverse=True,
+                result.causal_network, key=lambda l: l.strength, reverse=True
             ):
                 logger.info(
                     f"    {link.from_name} → {link.to_name}: "
-                    f"{link.strength:.3f} (lag={link.lag})"
+                    f"{link.strength:.3f} (lag={link.lag}, "
+                    f"p={link.p_value:.3f})"
                 )
