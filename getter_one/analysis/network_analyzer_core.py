@@ -188,24 +188,40 @@ class NetworkAnalyzerCore:
         n_permutations: int = 200,
         p_value_threshold: float = 0.05,
         rho_t_weight: float = 0.3,
+        adaptive: bool = True,
         enable_gpu_verification: bool = False,
     ):
+        # ユーザー指定値（adaptiveモードではヒントとして使用）
+        self.sync_threshold_hint = sync_threshold
+        self.causal_threshold_hint = causal_threshold
+        self.max_lag_hint = max_lag
+        self.delta_percentile_hint = delta_percentile
+        self.local_std_window_hint = local_std_window
+        self.rho_t_window_hint = rho_t_window
+
+        # ランタイム値（adaptive計算後に上書き）
         self.sync_threshold = sync_threshold
         self.causal_threshold = causal_threshold
         self.max_lag = max_lag
         self.delta_percentile = delta_percentile
         self.local_std_window = local_std_window
         self.rho_t_window = rho_t_window
+
         self.n_permutations = n_permutations
         self.p_value_threshold = p_value_threshold
         self.rho_t_weight = rho_t_weight
+        self.adaptive = adaptive
         self.enable_gpu_verification = enable_gpu_verification and _HAS_GPU_VERIFY
 
+        # Adaptive計算結果の保存先
+        self.adaptive_params: dict | None = None
+
         gpu_status = "enabled" if self.enable_gpu_verification else "disabled"
+        adaptive_status = "ON" if adaptive else "OFF"
         logger.info(
             f"✅ NetworkAnalyzerCore [Λ³ Native] initialized "
             f"(sync>{sync_threshold}, causal>{causal_threshold}, "
-            f"max_lag={max_lag}, delta_pct={delta_percentile}, "
+            f"max_lag={max_lag}, adaptive={adaptive_status}, "
             f"n_perm={n_permutations}, p<{p_value_threshold}, "
             f"gpu_verify={gpu_status})"
         )
@@ -263,6 +279,18 @@ class NetworkAnalyzerCore:
             )
             + ("..." if n_dims > 5 else "")
         )
+
+        # 1.5 Adaptive parameter tuning
+        if self.adaptive:
+            self.adaptive_params = self._compute_adaptive_parameters(
+                state_vectors, events_pos, events_neg, rho_t, n_frames, n_dims
+            )
+            self.sync_threshold = self.adaptive_params["sync_threshold"]
+            self.causal_threshold = self.adaptive_params["causal_threshold"]
+            self.max_lag = self.adaptive_params["max_lag"]
+            self.local_std_window = self.adaptive_params["local_std_window"]
+            self.rho_t_window = self.adaptive_params["rho_t_window"]
+            self.rho_t_weight = self.adaptive_params["rho_t_weight"]
 
         # 2. Sync行列（ΔΛC同時発火率 + ρT相関）
         sync_matrix, rho_t_corr_matrix = self._compute_sync_matrix(
@@ -339,6 +367,7 @@ class NetworkAnalyzerCore:
             dimension_names=dimension_names,
             event_counts=event_counts,
             event_quality_scores=event_quality_scores,
+            adaptive_params=self.adaptive_params,
         )
 
         self._print_summary(result)
@@ -378,6 +407,162 @@ class NetworkAnalyzerCore:
             initiator_names=[dimension_names[d] for d in initiators],
             propagation_order=propagation,
         )
+
+    # ================================================================
+    # Step 1.5: Adaptive Parameter Computation
+    # ================================================================
+
+    def _compute_adaptive_parameters(
+        self,
+        state_vectors: np.ndarray,
+        events_pos: np.ndarray,
+        events_neg: np.ndarray,
+        rho_t: np.ndarray,
+        n_frames: int,
+        n_dims: int,
+    ) -> dict:
+        """
+        データ特性とΔΛCイベント統計に基づくパラメータ自動調整。
+
+        調整対象:
+          sync_threshold, causal_threshold, max_lag,
+          local_std_window, rho_t_window, rho_t_weight
+        """
+        # --- 1. イベント密度 ---
+        events_all = np.minimum(events_pos + events_neg, 1.0)
+        event_density = np.mean(events_all)  # per dim per frame
+
+        # --- 2. 次元間イベント同時発火率 ---
+        cofiring_rates = []
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                cofiring = np.mean(events_all[:, i] * events_all[:, j])
+                cofiring_rates.append(cofiring)
+        mean_cofiring = float(np.mean(cofiring_rates)) if cofiring_rates else 0.0
+
+        # --- 3. ρT variability ---
+        rho_t_means = np.mean(rho_t, axis=0)
+        rho_t_overall_mean = np.mean(rho_t_means)
+        rho_t_cv = (
+            float(np.std(rho_t_means) / (rho_t_overall_mean + 1e-10))
+            if rho_t_overall_mean > 1e-10
+            else 0.0
+        )
+
+        # --- 4. Temporal volatility ---
+        temporal_changes = np.diff(state_vectors, axis=0)
+        temporal_vol = float(np.mean(np.std(temporal_changes, axis=0)))
+        global_std = float(np.std(state_vectors))
+        vol_ratio = temporal_vol / (global_std + 1e-10)
+
+        # === Adaptive sync_threshold ===
+        sync_scale = 1.0
+        # イベント密度が高い → 閾値を上げる
+        if event_density > 0.12:
+            sync_scale *= 1.3
+        elif event_density < 0.04:
+            sync_scale *= 0.8
+        # 同時発火率が高い → 全部syncっぽい → 閾値上げる
+        if mean_cofiring > 0.02:
+            sync_scale *= 1.2
+        # 次元数多い → 伝播確率が希薄化 → 閾値を下げる
+        if n_dims > 10:
+            sync_scale *= 0.85
+        elif n_dims > 5:
+            sync_scale *= 0.9
+
+        sync_threshold = float(
+            np.clip(self.sync_threshold_hint * sync_scale, 0.01, 0.30)
+        )
+
+        # === Adaptive causal_threshold ===
+        causal_scale = 1.0
+        if event_density > 0.12:
+            causal_scale *= 1.4
+        elif event_density < 0.04:
+            causal_scale *= 0.7
+        # 次元数多い → ペアあたりのイベント共起は減る → 閾値を下げる
+        if n_dims > 10:
+            causal_scale *= 0.8
+        elif n_dims > 5:
+            causal_scale *= 0.85
+        # ρTの変動が大きい → 構造変化が多い → 少し上げる
+        if rho_t_cv > 1.0:
+            causal_scale *= 1.1
+
+        causal_threshold = float(
+            np.clip(self.causal_threshold_hint * causal_scale, 0.02, 0.40)
+        )
+
+        # === Adaptive max_lag ===
+        # データ長に応じたスケーリング
+        lag_scale = 1.0
+        if n_frames < 200:
+            lag_scale *= 0.7
+        elif n_frames > 1000:
+            lag_scale *= 1.3
+        # 高volatility → 短いラグで伝播 → ラグ短縮
+        if vol_ratio > 1.5:
+            lag_scale *= 0.8
+        elif vol_ratio < 0.3:
+            lag_scale *= 1.2
+
+        max_lag = int(np.clip(self.max_lag_hint * lag_scale, 3, max(5, n_frames // 10)))
+
+        # === Adaptive windows ===
+        window_scale = 1.0
+        if n_frames < 200:
+            window_scale *= 0.7
+        elif n_frames > 1000:
+            window_scale *= 1.3
+        if vol_ratio > 1.5:
+            window_scale *= 0.8
+
+        local_std_window = int(
+            np.clip(self.local_std_window_hint * window_scale, 5, n_frames // 5)
+        )
+        rho_t_window = int(
+            np.clip(self.rho_t_window_hint * window_scale, 5, n_frames // 5)
+        )
+
+        # === Adaptive rho_t_weight ===
+        # ρTの変動が大きい → ρTが情報を持ってる → weight上げる
+        rho_t_weight = float(
+            np.clip(self.rho_t_weight + (rho_t_cv - 0.5) * 0.2, 0.1, 0.5)
+        )
+
+        params = {
+            "sync_threshold": sync_threshold,
+            "causal_threshold": causal_threshold,
+            "max_lag": max_lag,
+            "local_std_window": local_std_window,
+            "rho_t_window": rho_t_window,
+            "rho_t_weight": rho_t_weight,
+            "diagnostics": {
+                "event_density": float(event_density),
+                "mean_cofiring": mean_cofiring,
+                "rho_t_cv": rho_t_cv,
+                "vol_ratio": float(vol_ratio),
+                "n_frames": n_frames,
+                "n_dims": n_dims,
+            },
+        }
+
+        logger.info(
+            f"   🔧 Adaptive: sync={sync_threshold:.3f} "
+            f"(hint={self.sync_threshold_hint}), "
+            f"causal={causal_threshold:.3f} "
+            f"(hint={self.causal_threshold_hint}), "
+            f"max_lag={max_lag} (hint={self.max_lag_hint})"
+        )
+        logger.info(
+            f"      event_density={event_density:.3f}, "
+            f"cofiring={mean_cofiring:.4f}, "
+            f"ρT_cv={rho_t_cv:.3f}, "
+            f"vol_ratio={vol_ratio:.3f}"
+        )
+
+        return params
 
     # ================================================================
     # Step 1: Λ³ Event Extraction
@@ -739,11 +924,15 @@ class NetworkAnalyzerCore:
         n_dims: int,
     ) -> list[DimensionLink]:
         """
-        共通祖先フィルタ — Λ³条件付き伝播確率
+        スプリアスエッジ除去 — 共通祖先 + 媒介者の2パターン
 
-        A→B の因果候補に対し、Z が存在して
-          P(ΔΛC_B | ΔΛC_A, ΔΛC_Z未発火) が大幅に低下する場合、
-        A→B はスプリアスとして除去する。
+        Pattern 1: Common Ancestor (既存)
+          Z→A, Z→B が存在 → A→B はスプリアス
+          判定: P(B|A, Z未発火) が大幅低下 → Z経由の偽因果
+
+        Pattern 2: Mediator (新規)
+          A→M, M→C が存在 → A→C は媒介された偽因果
+          判定: P(C|A, M未発火) が大幅低下 → Mなしでは伝わらない
         """
         if len(causal_links) < 2 or n_dims < 3:
             return causal_links
@@ -759,14 +948,16 @@ class NetworkAnalyzerCore:
                 link_map[key] = link
 
         filtered = []
-        n_removed = 0
+        n_ancestor = 0
+        n_mediator = 0
 
         for link in causal_links:
             a, b = link.from_dim, link.to_dim
             lag_ab = link.lag
-            is_spurious = False
+            removal_reason = None
 
-            # Z候補を探す: Z→A かつ Z→B が存在する次元
+            # --- Pattern 1: Common Ancestor ---
+            # Z→A かつ Z→B が存在する次元を探す
             for z in range(n_dims):
                 if z in (a, b):
                     continue
@@ -777,35 +968,105 @@ class NetworkAnalyzerCore:
                 if z_to_a is None or z_to_b is None:
                     continue
 
-                # 条件付き伝播確率:
-                # Z発火時のA→B伝播 vs Z未発火時のA→B伝播
+                # ラグ整合性チェック:
+                # Z→A(lag_za) + A→B(lag_ab) ≈ Z→B(lag_zb) なら推移的偽因果
+                lag_za = z_to_a.lag
+                lag_zb = z_to_b.lag
+                lag_consistent = abs((lag_za + lag_ab) - lag_zb) <= max(1, lag_zb // 3)
+
+                # 条件付き確率チェック
                 prob_with_z, prob_without_z = self._conditional_propagation(
                     events_all, a, b, z, lag_ab
                 )
 
-                # Z発火時にしかA→Bが起きない → スプリアス
-                if (
+                # Z発火時のA発火数（検体数チェック）
+                a_events_vec = (
+                    events_all[:-lag_ab, a] if lag_ab > 0 else events_all[:, a]
+                )
+                z_active = np.zeros(len(a_events_vec))
+                for t in range(len(a_events_vec)):
+                    z_start = max(0, t - 2)
+                    z_end = min(len(events_all), t + 3)
+                    if np.any(events_all[z_start:z_end, z] > 0):
+                        z_active[t] = 1.0
+                n_a_without_z = np.sum((a_events_vec > 0) & (z_active == 0))
+                insufficient_samples = n_a_without_z < 3
+
+                # 判定: 条件付き確率で怪しい OR 検体不足
+                prob_suspicious = (
                     prob_without_z < link.strength * 0.5
                     and prob_with_z > prob_without_z * 1.5
-                ):
-                    is_spurious = True
+                )
+
+                # 両方の証拠が揃ったとき削除:
+                # (確率的に怪しい OR 検体不足) AND ラグ整合
+                if (prob_suspicious or insufficient_samples) and lag_consistent:
+                    removal_reason = "ancestor"
                     logger.debug(
-                        f"   🔍 Spurious: {link.from_name}→{link.to_name} "
-                        f"(ancestor: dim_{z}, "
+                        f"   🔍 Spurious (ancestor+lag): "
+                        f"{link.from_name}→{link.to_name} "
+                        f"(Z={z_to_a.from_name}, "
+                        f"lag_za={lag_za}+lag_ab={lag_ab}≈lag_zb={lag_zb}, "
                         f"P_with={prob_with_z:.3f}, "
-                        f"P_without={prob_without_z:.3f})"
+                        f"P_without={prob_without_z:.3f}, "
+                        f"n_without_z={int(n_a_without_z)})"
                     )
                     break
 
-            if is_spurious:
-                n_removed += 1
+            # --- Pattern 2: Mediator ---
+            # A→M かつ M→B が存在する次元を探す
+            if removal_reason is None:
+                for m in range(n_dims):
+                    if m in (a, b):
+                        continue
+
+                    a_to_m = link_map.get((a, m))
+                    m_to_b = link_map.get((m, b))
+
+                    if a_to_m is None or m_to_b is None:
+                        continue
+
+                    # ラグ整合性: A→M(lag1) + M→B(lag2) ≈ A→B(lag_ab)
+                    # 媒介経路のラグ合計が直接リンクのラグと近い場合のみ
+                    mediated_lag = a_to_m.lag + m_to_b.lag
+                    if abs(mediated_lag - lag_ab) > max(2, lag_ab // 2):
+                        continue
+
+                    # M未発火時のA→B伝播確率
+                    prob_with_m, prob_without_m = self._conditional_propagation(
+                        events_all, a, b, m, lag_ab
+                    )
+
+                    # Mなしでは伝わらない → 媒介された偽因果
+                    if (
+                        prob_without_m < link.strength * 0.4
+                        and prob_with_m > prob_without_m * 2.0
+                    ):
+                        removal_reason = "mediator"
+                        logger.debug(
+                            f"   🔍 Spurious (mediator): "
+                            f"{link.from_name}→{link.to_name} "
+                            f"(M={link_map[(a, m)].to_name}, "
+                            f"path: {link.from_name}→{link_map[(a, m)].to_name}"
+                            f"→{link.to_name}, "
+                            f"P_with={prob_with_m:.3f}, "
+                            f"P_without={prob_without_m:.3f})"
+                        )
+                        break
+
+            if removal_reason == "ancestor":
+                n_ancestor += 1
+            elif removal_reason == "mediator":
+                n_mediator += 1
             else:
                 filtered.append(link)
 
-        if n_removed > 0:
+        n_total = n_ancestor + n_mediator
+        if n_total > 0:
             logger.info(
-                f"   🔍 Common ancestor filter: "
-                f"{n_removed} removed, {len(filtered)} retained"
+                f"   🔍 Spurious filter: {n_total} removed "
+                f"(ancestor={n_ancestor}, mediator={n_mediator}), "
+                f"{len(filtered)} retained"
             )
 
         return filtered
